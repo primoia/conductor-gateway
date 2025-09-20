@@ -1,10 +1,13 @@
 """
 Tests for configuration management.
 """
+
 import os
+from unittest.mock import mock_open, patch
+
 import pytest
-from unittest.mock import patch, mock_open
-from src.config.settings import load_config, SERVER_CONFIG, CONDUCTOR_CONFIG
+
+from src.config.settings import CONDUCTOR_CONFIG, SERVER_CONFIG, load_config
 
 
 @pytest.mark.unit
@@ -13,8 +16,8 @@ class TestConfigurationLoading:
 
     def test_load_config_with_yaml_file(self, temp_config_file):
         """Test loading configuration from YAML file."""
-        with patch('pathlib.Path.exists', return_value=True):
-            with patch('builtins.open', mock_open(read_data=open(temp_config_file, 'r').read())):
+        with patch("pathlib.Path.exists", return_value=True):
+            with patch("builtins.open", mock_open(read_data=open(temp_config_file).read())):
                 config = load_config()
 
                 assert config["server"]["host"] == "127.0.0.1"
@@ -24,7 +27,7 @@ class TestConfigurationLoading:
 
     def test_load_config_fallback_to_defaults(self):
         """Test configuration fallback when YAML file doesn't exist."""
-        with patch('pathlib.Path.exists', return_value=False):
+        with patch("pathlib.Path.exists", return_value=False):
             config = load_config()
 
             # Should have default values
@@ -35,12 +38,15 @@ class TestConfigurationLoading:
 
     def test_environment_variable_override(self, temp_config_file):
         """Test that environment variables override config file values."""
-        with patch.dict(os.environ, {
-            'HOST': '192.168.1.100',
-            'PORT': '9000',
-            'CONDUCTOR_PROJECT_PATH': '/custom/conductor/path'
-        }):
-            with patch('pathlib.Path.exists', return_value=False):
+        with patch.dict(
+            os.environ,
+            {
+                "HOST": "192.168.1.100",
+                "PORT": "9000",
+                "CONDUCTOR_PROJECT_PATH": "/custom/conductor/path",
+            },
+        ):
+            with patch("pathlib.Path.exists", return_value=False):
                 config = load_config()
 
                 assert config["server"]["host"] == "192.168.1.100"
@@ -51,8 +57,8 @@ class TestConfigurationLoading:
         """Test handling of invalid YAML file."""
         invalid_yaml = "invalid: yaml: content: ["
 
-        with patch('pathlib.Path.exists', return_value=True):
-            with patch('builtins.open', mock_open(read_data=invalid_yaml)):
+        with patch("pathlib.Path.exists", return_value=True):
+            with patch("builtins.open", mock_open(read_data=invalid_yaml)):
                 config = load_config()
 
                 # Should fall back to defaults
@@ -73,17 +79,20 @@ class TestConfigurationLoading:
         assert isinstance(CONDUCTOR_CONFIG["project_path"], str)
         assert isinstance(CONDUCTOR_CONFIG["timeout"], int)
 
-    @pytest.mark.parametrize("env_var,config_path,expected", [
-        ("HOST", ["server", "host"], "test.host"),
-        ("PORT", ["server", "port"], 8888),
-        ("MCP_PORT", ["server", "mcp_port"], 9999),
-        ("CONDUCTOR_PROJECT_PATH", ["conductor", "project_path"], "/test/path"),
-        ("CONDUCTOR_TIMEOUT", ["conductor", "timeout"], 600),
-    ])
+    @pytest.mark.parametrize(
+        "env_var,config_path,expected",
+        [
+            ("HOST", ["server", "host"], "test.host"),
+            ("PORT", ["server", "port"], 8888),
+            ("MCP_PORT", ["server", "mcp_port"], 9999),
+            ("CONDUCTOR_PROJECT_PATH", ["conductor", "project_path"], "/test/path"),
+            ("CONDUCTOR_TIMEOUT", ["conductor", "timeout"], 600),
+        ],
+    )
     def test_environment_variable_mapping(self, env_var, config_path, expected, temp_config_file):
         """Test that environment variables correctly map to config paths."""
         with patch.dict(os.environ, {env_var: str(expected)}):
-            with patch('pathlib.Path.exists', return_value=False):
+            with patch("pathlib.Path.exists", return_value=False):
                 config = load_config()
 
                 # Navigate to the config value using the path

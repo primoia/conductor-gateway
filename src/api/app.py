@@ -1,37 +1,42 @@
 """
 FastAPI Application for Conductor Gateway with SSE Support
 """
-import uvicorn
+
+import asyncio
+import json
+import logging
 import threading
 import time
-import logging
-import asyncio
 import uuid
-import json
 from contextlib import asynccontextmanager
-from typing import Dict, Any
-from fastapi import FastAPI, Request, Response, HTTPException
+from typing import Any
+
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+
 from config.settings import SERVER_CONFIG
 from utils.mcp_utils import init_agent
 
 logger = logging.getLogger(__name__)
 
 # SSE Stream Manager - Global dictionary to manage active streams
-ACTIVE_STREAMS: Dict[str, asyncio.Queue] = {}
+ACTIVE_STREAMS: dict[str, asyncio.Queue] = {}
+
 
 def start_mcp_server():
     """Starts MCP server in a separate thread."""
     try:
         logger.info("Starting MCP server thread...")
         from server.advanced_server import ConductorAdvancedMCPServer
+
         server = ConductorAdvancedMCPServer(port=SERVER_CONFIG["mcp_port"])
-        server.run(transport='sse')
+        server.run(transport="sse")
     except Exception as e:
         logger.error(f"Failed to start MCP server: {e}", exc_info=True)
 
-async def run_agent_with_queue(job_id: str, payload: Dict[str, Any], queue: asyncio.Queue):
+
+async def run_agent_with_queue(job_id: str, payload: dict[str, Any], queue: asyncio.Queue):
     """Execute agent and populate queue with events using native MCPAgent event subscription."""
     try:
         logger.info(f"Starting agent execution for job {job_id}")
@@ -44,7 +49,7 @@ async def run_agent_with_queue(job_id: str, payload: Dict[str, Any], queue: asyn
                     "reconnect": True,
                     "reconnectInterval": 1000,
                     "maxReconnectAttempts": 5,
-                    "timeout": 30000
+                    "timeout": 30000,
                 }
             }
         }
@@ -57,7 +62,7 @@ async def run_agent_with_queue(job_id: str, payload: Dict[str, Any], queue: asyn
                     "event": event_name,
                     "data": data,
                     "timestamp": time.time(),
-                    "job_id": job_id
+                    "job_id": job_id,
                 }
                 try:
                     queue.put_nowait(event_data)
@@ -66,30 +71,33 @@ async def run_agent_with_queue(job_id: str, payload: Dict[str, Any], queue: asyn
                     logger.warning(f"Queue full for job {job_id}, dropping event {event_name}")
                 except Exception as e:
                     logger.error(f"Error queuing event {event_name}: {e}")
+
             return handler
 
         # Subscribe to MCPAgent events using native API
         try:
             # Standard LangChain callback events that MCPAgent likely supports
-            agent.on('on_llm_start', create_event_handler('on_llm_start'))
-            agent.on('on_llm_new_token', create_event_handler('on_llm_new_token'))
-            agent.on('on_llm_end', create_event_handler('on_llm_end'))
-            agent.on('on_tool_start', create_event_handler('on_tool_start'))
-            agent.on('on_tool_end', create_event_handler('on_tool_end'))
-            agent.on('on_chain_start', create_event_handler('on_chain_start'))
-            agent.on('on_chain_end', create_event_handler('on_chain_end'))
+            agent.on("on_llm_start", create_event_handler("on_llm_start"))
+            agent.on("on_llm_new_token", create_event_handler("on_llm_new_token"))
+            agent.on("on_llm_end", create_event_handler("on_llm_end"))
+            agent.on("on_tool_start", create_event_handler("on_tool_start"))
+            agent.on("on_tool_end", create_event_handler("on_tool_end"))
+            agent.on("on_chain_start", create_event_handler("on_chain_start"))
+            agent.on("on_chain_end", create_event_handler("on_chain_end"))
             logger.info(f"Event handlers registered for job {job_id}")
         except AttributeError as e:
             logger.warning(f"Some event handlers not available: {e}")
             # Continue execution even if some events aren't supported
 
         # Send initial status event
-        await queue.put({
-            "event": "job_started",
-            "data": {"message": "Inicializando execução do conductor..."},
-            "timestamp": time.time(),
-            "job_id": job_id
-        })
+        await queue.put(
+            {
+                "event": "job_started",
+                "data": {"message": "Inicializando execução do conductor..."},
+                "timestamp": time.time(),
+                "job_id": job_id,
+            }
+        )
 
         # Extract user command from payload
         user_command = payload.get("textEntries", [{}])[0].get("content", "")
@@ -99,45 +107,54 @@ async def run_agent_with_queue(job_id: str, payload: Dict[str, Any], queue: asyn
         logger.info(f"Executing command: {user_command[:100]}...")
 
         # Send progress event
-        await queue.put({
-            "event": "status_update",
-            "data": {"message": "Conectando ao conductor e descobrindo ferramentas..."},
-            "timestamp": time.time(),
-            "job_id": job_id
-        })
+        await queue.put(
+            {
+                "event": "status_update",
+                "data": {"message": "Conectando ao conductor e descobrindo ferramentas..."},
+                "timestamp": time.time(),
+                "job_id": job_id,
+            }
+        )
 
         # Execute the agent command (this is blocking but handlers will fire during execution)
         result = await agent.run(user_command)
 
         # Send result event
-        await queue.put({
-            "event": "result",
-            "data": {"result": result, "message": "Comando executado com sucesso"},
-            "timestamp": time.time(),
-            "job_id": job_id
-        })
+        await queue.put(
+            {
+                "event": "result",
+                "data": {"result": result, "message": "Comando executado com sucesso"},
+                "timestamp": time.time(),
+                "job_id": job_id,
+            }
+        )
 
         logger.info(f"Agent execution completed for job {job_id}")
 
     except Exception as e:
         logger.error(f"Error in agent execution for job {job_id}: {e}", exc_info=True)
-        await queue.put({
-            "event": "error",
-            "data": {"error": str(e), "message": "Erro durante execução"},
-            "timestamp": time.time(),
-            "job_id": job_id
-        })
+        await queue.put(
+            {
+                "event": "error",
+                "data": {"error": str(e), "message": "Erro durante execução"},
+                "timestamp": time.time(),
+                "job_id": job_id,
+            }
+        )
     finally:
         # Signal end of stream
-        await queue.put({
-            "event": "end_of_stream",
-            "data": {"message": "Stream finalizado"},
-            "timestamp": time.time(),
-            "job_id": job_id
-        })
+        await queue.put(
+            {
+                "event": "end_of_stream",
+                "data": {"message": "Stream finalizado"},
+                "timestamp": time.time(),
+                "job_id": job_id,
+            }
+        )
         # Clean up the stream from active dictionary
         ACTIVE_STREAMS.pop(job_id, None)
         logger.info(f"Cleaned up stream for job {job_id}")
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -157,6 +174,7 @@ async def lifespan(app: FastAPI):
     # Shutdown
     logger.info("Conductor Gateway API shutting down...")
 
+
 def create_app() -> FastAPI:
     """Create and configure FastAPI application."""
 
@@ -167,7 +185,7 @@ def create_app() -> FastAPI:
         version="3.1.0",
         lifespan=lifespan,
         docs_url="/docs",
-        redoc_url="/redoc"
+        redoc_url="/redoc",
     )
 
     # Add CORS middleware
@@ -190,11 +208,13 @@ def create_app() -> FastAPI:
 
             # Parse request payload
             payload = await request.json()
-            command_preview = payload.get('textEntries', [{}])[0].get('content', '')[:50]
+            command_preview = payload.get("textEntries", [{}])[0].get("content", "")[:50]
             if not command_preview:
-                command_preview = payload.get('input', '')[:50] or payload.get('command', '')[:50]
+                command_preview = payload.get("input", "")[:50] or payload.get("command", "")[:50]
 
-            logger.info(f"Starting streaming execution for job {job_id}, command: {command_preview}...")
+            logger.info(
+                f"Starting streaming execution for job {job_id}, command: {command_preview}..."
+            )
 
             # Create event queue for this job
             event_queue = asyncio.Queue(maxsize=1000)  # Prevent memory issues
@@ -216,8 +236,7 @@ def create_app() -> FastAPI:
         queue = ACTIVE_STREAMS.get(job_id)
         if not queue:
             return Response(
-                status_code=404,
-                content=f"Job ID '{job_id}' not found or already completed."
+                status_code=404, content=f"Job ID '{job_id}' not found or already completed."
             )
 
         logger.info(f"Starting SSE stream for job {job_id}")
@@ -247,7 +266,7 @@ def create_app() -> FastAPI:
                     "event": "error",
                     "data": {"error": str(e)},
                     "timestamp": time.time(),
-                    "job_id": job_id
+                    "job_id": job_id,
                 }
                 yield f"data: {json.dumps(error_event)}\\n\\n"
             finally:
@@ -262,12 +281,12 @@ def create_app() -> FastAPI:
                 "Cache-Control": "no-cache",
                 "Connection": "keep-alive",
                 "Access-Control-Allow-Origin": "*",
-                "Access-Control-Allow-Headers": "*"
-            }
+                "Access-Control-Allow-Headers": "*",
+            },
         )
 
     @app.post("/execute")
-    async def execute_command(payload: Dict[str, Any]):
+    async def execute_command(payload: dict[str, Any]):
         """Simple synchronous execute endpoint for direct command execution."""
         try:
             # Extract command from different payload formats
@@ -299,10 +318,7 @@ def create_app() -> FastAPI:
             agent = init_agent(agent_config)
             result = await agent.run(command)
 
-            return {
-                "status": "success",
-                "result": result
-            }
+            return {"status": "success", "result": result}
 
         except Exception as e:
             logger.error(f"Error executing command: {e}", exc_info=True)
@@ -320,8 +336,8 @@ def create_app() -> FastAPI:
             "endpoints": {
                 "api": f"http://{SERVER_CONFIG['host']}:{SERVER_CONFIG['port']}/api/v1",
                 "mcp": f"http://{SERVER_CONFIG['host']}:{SERVER_CONFIG['mcp_port']}",
-                "health": f"http://{SERVER_CONFIG['host']}:{SERVER_CONFIG['port']}/health"
-            }
+                "health": f"http://{SERVER_CONFIG['host']}:{SERVER_CONFIG['port']}/health",
+            },
         }
 
     return app

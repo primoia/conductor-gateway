@@ -1,18 +1,20 @@
 """
 Tests for utility functions.
 """
+
+from unittest.mock import MagicMock, patch
+
 import pytest
-from unittest.mock import patch, MagicMock, AsyncMock
 
 
 @pytest.mark.unit
 class TestMCPUtils:
     """Test MCP utility functions."""
 
-    @patch('src.utils.mcp_utils.MCPAgent')
-    @patch('src.utils.mcp_utils.MCPClient')
-    @patch('src.utils.mcp_utils.ChatOpenAI')
-    @patch.dict('os.environ', {'OPENAI_API_KEY': 'test-key'})
+    @patch("src.utils.mcp_utils.MCPAgent")
+    @patch("src.utils.mcp_utils.MCPClient")
+    @patch("src.utils.mcp_utils.ChatOpenAI")
+    @patch.dict("os.environ", {"OPENAI_API_KEY": "test-key"})
     def test_init_agent_with_config(self, mock_llm, mock_client_class, mock_agent_class):
         """Test agent initialization with configuration."""
         from src.utils.mcp_utils import init_agent
@@ -25,11 +27,7 @@ class TestMCPUtils:
 
         agent_config = {
             "mcpServers": {
-                "http": {
-                    "url": "http://localhost:8006/sse",
-                    "reconnect": True,
-                    "timeout": 30000
-                }
+                "http": {"url": "http://localhost:8006/sse", "reconnect": True, "timeout": 30000}
             }
         }
 
@@ -39,8 +37,8 @@ class TestMCPUtils:
         mock_client_class.from_dict.assert_called_once_with(agent_config)
         mock_agent_class.assert_called_once()
 
-    @patch('src.utils.mcp_utils.MCPAgent')
-    @patch('src.utils.mcp_utils.MCPClient')
+    @patch("src.utils.mcp_utils.MCPAgent")
+    @patch("src.utils.mcp_utils.MCPClient")
     def test_init_agent_without_config(self, mock_client_class, mock_agent_class):
         """Test agent initialization without valid config."""
         from src.utils.mcp_utils import init_agent
@@ -48,7 +46,7 @@ class TestMCPUtils:
         with pytest.raises(ValueError, match="A configuração do agente está incompleta ou vazia"):
             init_agent(agent_config=None)
 
-    @patch('src.utils.mcp_utils.MCPClient')
+    @patch("src.utils.mcp_utils.MCPClient")
     def test_init_agent_with_exception(self, mock_client_class):
         """Test agent initialization when MCPClient raises exception."""
         from src.utils.mcp_utils import init_agent
@@ -68,25 +66,29 @@ class TestImportStructure:
     def test_api_app_imports(self):
         """Test that API app imports work."""
         from src.api.app import create_app
+
         assert callable(create_app)
 
     def test_config_imports(self):
         """Test that config imports work."""
-        from src.config.settings import SERVER_CONFIG, CONDUCTOR_CONFIG
+        from src.config.settings import CONDUCTOR_CONFIG, SERVER_CONFIG
+
         assert isinstance(SERVER_CONFIG, dict)
         assert isinstance(CONDUCTOR_CONFIG, dict)
 
     def test_server_imports(self):
         """Test that server imports work."""
-        with patch('src.server.advanced_server.FastMCP'):
-            with patch('src.server.advanced_server.ConductorAdvancedTools'):
+        with patch("src.server.advanced_server.FastMCP"):
+            with patch("src.server.advanced_server.ConductorAdvancedTools"):
                 from src.server.advanced_server import ConductorAdvancedMCPServer
+
                 assert ConductorAdvancedMCPServer is not None
 
     def test_main_imports(self):
         """Test that main module imports work."""
-        with patch('src.main.start_mcp_server'):
+        with patch("src.main.start_mcp_server"):
             from src.main import main
+
             assert callable(main)
 
 
@@ -97,6 +99,7 @@ class TestProjectStructure:
     def test_src_directory_structure(self):
         """Test that expected source directories exist."""
         import os
+
         base_path = "/mnt/ramdisk/primoia-main/primoia-monorepo/projects/conductor-gateway"
 
         expected_dirs = [
@@ -108,7 +111,7 @@ class TestProjectStructure:
             "src/utils",
             "tests",
             "tests/unit",
-            "tests/integration"
+            "tests/integration",
         ]
 
         for directory in expected_dirs:
@@ -118,6 +121,7 @@ class TestProjectStructure:
     def test_essential_files_exist(self):
         """Test that essential project files exist."""
         import os
+
         base_path = "/mnt/ramdisk/primoia-main/primoia-monorepo/projects/conductor-gateway"
 
         expected_files = [
@@ -126,7 +130,7 @@ class TestProjectStructure:
             "src/api/app.py",
             "src/config/settings.py",
             "src/server/advanced_server.py",
-            "pytest.ini"
+            "pytest.ini",
         ]
 
         for file_path in expected_files:
