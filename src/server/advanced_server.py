@@ -2,7 +2,7 @@ import logging
 
 from mcp.server import FastMCP
 
-from tools.conductor_advanced_tools import ConductorAdvancedTools
+from src.tools.conductor_advanced_tools import ConductorAdvancedTools
 
 logger = logging.getLogger(__name__)
 
