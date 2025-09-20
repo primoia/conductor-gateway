@@ -217,7 +217,7 @@ def create_app() -> FastAPI:
             )
 
             # Create event queue for this job
-            event_queue = asyncio.Queue(maxsize=1000)  # Prevent memory issues
+            event_queue: asyncio.Queue = asyncio.Queue(maxsize=1000)  # Prevent memory issues
             ACTIVE_STREAMS[job_id] = event_queue
 
             # Start agent execution in background task
