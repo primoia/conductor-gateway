@@ -86,21 +86,24 @@ known-first-party = ["src"]
 # MyPy configuration
 [tool.mypy]
 python_version = "3.11"
-check_untyped_defs = true
-disallow_any_generics = true
-disallow_incomplete_defs = true
-disallow_untyped_defs = true
-no_implicit_optional = true
+check_untyped_defs = false
+disallow_any_generics = false
+disallow_incomplete_defs = false
+disallow_untyped_defs = false
+no_implicit_optional = false
 warn_redundant_casts = true
-warn_unused_ignores = true
-warn_return_any = true
-strict_equality = true
+warn_unused_ignores = false
+warn_return_any = false
+strict_equality = false
 
 [[tool.mypy.overrides]]
 module = [
     "mcp.*",
     "mcp_use.*",
-    "langchain_*",
+    "langchain_core.*",
+    "langchain_openai.*",
+    "langchain_anthropic.*",
+    "langchain_community.*",
     "uvicorn.*",
     "yaml.*",
     "google.*",

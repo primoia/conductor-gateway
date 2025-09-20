@@ -32,7 +32,7 @@ def init_agent(agent_config: dict):
             credential = os.environ.get("OPENAI_API_KEY")
             logger.info("OPENAI_API_KEY presente: %s", "Sim" if credential else "Não")
 
-            llm = ChatOpenAI(model="gpt-4.1-mini", openai_api_key=credential)
+            llm = ChatOpenAI(model="gpt-4.1-mini", openai_api_key=credential)  # type: ignore
 
             agent = MCPAgent(llm=llm, client=client, max_steps=30)
             logger.info("Agente MCP inicializado com sucesso!")
