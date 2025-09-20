@@ -1,0 +1,85 @@
+# --- Python & Virtual Environments ---
+# Virtual environment folders
+.venv/
+venv/
+# Python cache
+__pycache__/
+*.pyc
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+# Environment variables
+.env
+.env.*
+!.env.example
+
+# --- IDE & Editor Config ---
+# JetBrains
+.idea/
+# VSCode
+.vscode/
+# Vim
+*.swp
+*.swo
+# Other
+.claude/
+.cursor/
+.gemini/
+.workspace/
+.conductor_workspace/
+
+# --- OS & System Files ---
+.DS_Store
+Thumbs.db
+
+# --- Logs & Temporary Files ---
+# Log files
+logs/
+*.log
+/tmp/conductor-*.log
+# Temporary files
+*.tmp
+*.backup
+
+# --- Testing & Coverage ---
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+
+# --- Docker ---
+docker-compose.override.yml
+
+# --- Project Specific ---
+# Configuration files (user-specific settings)
+config.yaml
+config.yaml.backup.*
+!config.yaml.example
+
+# Agent state files (contain conversation history and session data)
+**/state.json
+state.json
+
+# Example template projects that should not be tracked
+
+# IDE and local tooling
+.kiro/
+.vscode/
+.idea/
+.claude/

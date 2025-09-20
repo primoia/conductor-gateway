@@ -1,0 +1,15 @@
+# Conductor Gateway Configuration
+# Copy this file to config.yaml and adjust the values
+
+server:
+  host: "0.0.0.0"
+  port: 5006
+  mcp_port: 8006
+
+conductor:
+  project_path: "/mnt/ramdisk/primoia-main/primoia-monorepo/projects/conductor"
+  scripts_path: "scripts"
+  timeout: 300
+
+# Environment variables will override these values if set
+# Example: PORT environment variable will override server.port
