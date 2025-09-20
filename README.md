@@ -1,144 +1,353 @@
-# 🎼 Conductor Gateway
+# Conductor Gateway
 
-> The API gateway for the Conductor AI ecosystem, bridging web interfaces with the powerful Conductor engine.
+[![Tests](https://github.com/primoia/conductor-gateway/actions/workflows/test.yml/badge.svg)](https://github.com/primoia/conductor-gateway/actions/workflows/test.yml)
+[![Code Quality](https://github.com/primoia/conductor-gateway/actions/workflows/lint.yml/badge.svg)](https://github.com/primoia/conductor-gateway/actions/workflows/lint.yml)
+[![Docker Build](https://github.com/primoia/conductor-gateway/actions/workflows/docker.yml/badge.svg)](https://github.com/primoia/conductor-gateway/actions/workflows/docker.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 
-[![Python](https://img.shields.io/badge/Python-3.11+-blue.svg)](https://python.org)
-[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![Build Status](https://img.shields.io/badge/Build-Passing-brightgreen.svg)]()
-[![Code Style](https://img.shields.io/badge/Code%20Style-Black-black.svg)]()
+**A high-performance, autonomous gateway service that bridges web applications with the Conductor agent execution system through Server-Sent Events (SSE) streaming and Model Context Protocol (MCP) integration.**
 
----
+## 🚀 Features
 
-## 🚀 Overview
+### 🔄 **Real-time Agent Execution**
+- **SSE Streaming**: Live event streaming from agent execution with job queues
+- **Multiple Payload Formats**: Support for `textEntries`, `input`, and `command` formats
+- **Background Processing**: Non-blocking agent execution with real-time updates
 
-**Conductor Gateway** is a standalone FastAPI application that serves as the primary entry point for all UI clients (web, mobile, desktop) to interact with the `conductor` engine. It exposes the powerful, CLI-based features of Conductor through a modern, secure, and easy-to-use REST and SSE (Server-Sent Events) API.
+### 🛠 **MCP Server Integration**
+- **13+ Advanced Tools**: Complete Conductor CLI integration including:
+  - Agent listing, info, and validation
+  - Stateless and contextual execution modes
+  - Interactive sessions with conversation history
+  - System management (backup, restore, migration)
+  - Template installation and configuration
 
-This gateway enables real-time monitoring of AI agent execution, making it possible to build rich, interactive user interfaces on top of the headless Conductor core.
+### 🏗 **Production Architecture**
+- **FastAPI Framework**: High-performance async API with automatic OpenAPI docs
+- **Poetry Dependency Management**: Modern Python packaging with lock files
+- **Docker Support**: Multi-stage builds with health checks
+- **Configuration Management**: YAML-based config with environment overrides
 
-### Architecture Flow
+### 🧪 **Quality Assurance**
+- **Comprehensive Testing**: 52+ test cases covering unit, integration, and API testing
+- **GitHub Actions CI/CD**: Automated testing, linting, security checks, and releases
+- **Code Quality Tools**: Ruff formatting, MyPy typing, Bandit security scanning
+- **Pre-commit Hooks**: Automated quality checks on every commit
 
-```
-+-----------------------+
-|   UI Clients          |
-| (Web, Mobile, etc.)   |
-+-----------------------+
-          |
-          v (REST / SSE API Calls)
-+-----------------------+
-|   Conductor Gateway   |
-| (FastAPI + MCP Server)|
-+-----------------------+
-          |
-          v (CLI Commands)
-+-----------------------+
-|   Conductor Engine    |
-| (Headless AI Worker)  |
-+-----------------------+
-```
-
-## ✨ Key Features
-
--   **Single Point of Entry:** Provides a unified API for all Conductor interactions.
--   **Real-Time Streaming:** Uses Server-Sent Events (SSE) to stream agent execution logs and tokens in real-time.
--   **Standardized & Autonomous:** Built with modern Python standards, using Poetry for dependency management and a `src/` layout.
--   **Hybrid Configuration:** Easily configured via a `config.yaml` file, with support for environment variable overrides for production deployments.
--   **Containerized:** Includes a multi-stage `Dockerfile` and `docker-compose.yml` for easy and secure deployment.
--   **Extensible:** Exposes the full capabilities of the Conductor engine's advanced tools.
-
-## 🏁 Getting Started
-
-This guide will help you get the Conductor Gateway running locally.
+## 📦 Installation
 
 ### Prerequisites
+- **Python 3.11+**
+- **Poetry** (for dependency management)
+- **Docker** (optional, for containerized deployment)
 
--   Git
--   Docker and Docker Compose
--   A local clone of the [conductor](https://github.com/primoia/conductor) project.
-
-### 1. Clone the Repository
+### Local Development Setup
 
 ```bash
+# Clone the repository
 git clone https://github.com/primoia/conductor-gateway.git
 cd conductor-gateway
+
+# Install Poetry (if not already installed)
+curl -sSL https://install.python-poetry.org | python3 -
+
+# Install dependencies
+poetry install
+
+# Copy configuration template
+cp config.yaml.example config.yaml
+
+# Start the server
+poetry run python src/main.py
 ```
 
-### 2. Configure the Gateway
-
-You need to tell the gateway where to find your `conductor` engine instance.
+### Docker Deployment
 
 ```bash
-# Copy the example configuration
-cp config.yaml.example config.yaml
+# Build the image
+docker build -t conductor-gateway .
+
+# Run with docker-compose
+docker-compose up -d
+
+# Or run standalone
+docker run -p 5006:5006 -p 8006:8006 conductor-gateway
 ```
 
-Now, open `config.yaml` and edit the `conductor.project_path` to point to the absolute path of your local `conductor` project directory.
+## ⚙️ Configuration
+
+### Environment Variables
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `HOST` | Server host address | `0.0.0.0` |
+| `PORT` | API server port | `5006` |
+| `MCP_PORT` | MCP server port | `8006` |
+| `CONDUCTOR_PROJECT_PATH` | Path to Conductor project | `/path/to/conductor` |
+| `CONDUCTOR_TIMEOUT` | Command execution timeout | `300` |
+| `OPENAI_API_KEY` | OpenAI API key for LLM | Required for agent execution |
+
+### Configuration File
+
+Create `config.yaml` based on `config.yaml.example`:
 
 ```yaml
-# config.yaml
-
 server:
   host: "0.0.0.0"
   port: 5006
   mcp_port: 8006
 
 conductor:
-  # IMPORTANT: Change this to the correct path on your system
-  project_path: "/path/to/your/conductor/project"
+  project_path: "/path/to/conductor"
+  scripts_path: "scripts"
+  timeout: 300
 ```
 
-### 3. Run the Service
+## 🔌 API Usage
 
-The easiest way to run the gateway is with Docker Compose. This command will build the Docker image and start the service.
-
-```bash
-docker compose up --build
-```
-
-### 4. Verify Installation
-
-Once the container is running, you can check if the gateway is healthy by accessing the `/health` endpoint:
+### Health Check
 
 ```bash
 curl http://localhost:5006/health
 ```
 
-You should see a JSON response with `"status": "healthy"`.
+Response:
+```json
+{
+  "status": "healthy",
+  "service": "conductor_gateway",
+  "version": "3.1.0",
+  "endpoints": {
+    "api": "http://localhost:5006/api/v1",
+    "mcp": "http://localhost:8006",
+    "health": "http://localhost:5006/health"
+  }
+}
+```
 
-## ⚙️ API Usage
+### Synchronous Execution
 
-The primary way to interact with the gateway is via the SSE streaming endpoint. You first make a `POST` request to start a job, and then connect to a `GET` endpoint to receive the event stream.
+```bash
+curl -X POST http://localhost:5006/execute \
+  -H "Content-Type: application/json" \
+  -d '{
+    "textEntries": [
+      {"content": "List available agents", "type": "text"}
+    ]
+  }'
+```
 
-**1. Start an execution:**
+### Streaming Execution (SSE)
 
+**Step 1**: Start execution
 ```bash
 curl -X POST http://localhost:5006/api/v1/stream-execute \
   -H "Content-Type: application/json" \
   -d '{
-    "command": "list all available agents"
+    "input": "Execute agent with real-time updates"
   }'
 ```
 
-This will return a `job_id`, for example: `{"job_id":"job_12345..."}`.
-
-**2. Connect to the stream:**
-
-```bash
-curl http://localhost:5006/api/v1/stream/job_12345...
+Response:
+```json
+{
+  "job_id": "job_123e4567-e89b-12d3-a456-426614174000",
+  "status": "started",
+  "stream_url": "/api/v1/stream/job_123e4567-e89b-12d3-a456-426614174000"
+}
 ```
 
-This will keep the connection open and stream back events from the agent's execution in real-time.
+**Step 2**: Connect to SSE stream
+```bash
+curl -N http://localhost:5006/api/v1/stream/job_123e4567-e89b-12d3-a456-426614174000
+```
+
+SSE Events:
+```
+data: {"event": "job_started", "data": {"message": "Inicializando execução..."}, "timestamp": 1234567890, "job_id": "job_123..."}
+
+data: {"event": "status_update", "data": {"message": "Conectando ao conductor..."}, "timestamp": 1234567891, "job_id": "job_123..."}
+
+data: {"event": "result", "data": {"result": "Agent response", "message": "Comando executado com sucesso"}, "timestamp": 1234567892, "job_id": "job_123..."}
+```
+
+### Multiple Payload Formats
+
+The API supports various payload formats for flexibility:
+
+```bash
+# Format 1: textEntries (complex structure)
+{
+  "textEntries": [
+    {"content": "Your command here", "type": "text"}
+  ],
+  "metadata": {"source": "web"}
+}
+
+# Format 2: input (simple)
+{
+  "input": "Your command here"
+}
+
+# Format 3: command (direct)
+{
+  "command": "Your command here"
+}
+```
+
+## 🛠 Development
+
+### Running Tests
+
+```bash
+# Run all tests
+poetry run pytest
+
+# Run specific test categories
+poetry run pytest -m unit          # Unit tests only
+poetry run pytest -m integration   # Integration tests only
+poetry run pytest -m api          # API tests only
+
+# Run with coverage
+poetry run pytest --cov=src --cov-report=html
+
+# Quick validation script
+python run_tests.py
+```
+
+### Code Quality
+
+```bash
+# Format code
+poetry run ruff format src/ tests/
+
+# Lint code
+poetry run ruff check src/ tests/
+
+# Type checking
+poetry run mypy src/
+
+# Security scanning
+poetry run bandit -r src/
+
+# Install pre-commit hooks
+poetry run pre-commit install
+```
+
+### Project Structure
+
+```
+conductor-gateway/
+├── src/                        # Source code
+│   ├── api/                   # FastAPI application
+│   ├── config/                # Configuration management
+│   ├── server/                # MCP server implementation
+│   ├── tools/                 # Conductor CLI tools
+│   └── utils/                 # Utility functions
+├── tests/                     # Test suite
+│   ├── unit/                  # Unit tests
+│   ├── integration/           # Integration tests
+│   └── conftest.py           # Test configuration
+├── .github/                   # GitHub Actions workflows
+├── docs/                      # Documentation
+├── pyproject.toml            # Project configuration
+├── Dockerfile                # Container definition
+└── docker-compose.yml       # Development environment
+```
+
+## 🔧 MCP Tools Available
+
+The gateway provides 13+ MCP tools for comprehensive Conductor integration:
+
+### Basic Commands
+- `list_available_agents` - List all available agents with capabilities
+- `get_agent_info` - Get detailed agent information
+- `validate_conductor_system` - Validate system configuration
+
+### Agent Execution
+- `execute_agent_stateless` - Fast execution without history
+- `execute_agent_contextual` - Execution with conversation context
+- `start_interactive_session` - Interactive agent sessions
+
+### System Management
+- `install_agent_templates` - Install agent templates
+- `backup_agents` / `restore_agents` - Agent backup/restore
+- `migrate_storage` - Storage migration (filesystem ↔ MongoDB)
+
+### Configuration
+- `set_environment` - Set environment context
+- `get_system_config` - Get current configuration
+- `clear_agent_history` - Clear conversation history
 
 ## 📚 Documentation
 
-For detailed documentation on the architecture, API endpoints, and setup guides, please see the [docs/](./docs/) directory.
-
--   **[SAGA-GW-01: Structuring and Autonomy Plan](./docs/history/sagas/01_decouple_shared_lib.md)**
--   **[SAGA-GW-02: Tests and Documentation Plan](./docs/history/sagas/02_tests_and_documentation.md)**
+- [Architecture Overview](docs/architecture/01_gateway_overview.md)
+- [Local Development Guide](docs/guides/01_local_setup.md)
+- [API Documentation](docs/guides/02_api_usage.md)
+- [Contributing Guidelines](CONTRIBUTING.md)
 
 ## 🤝 Contributing
 
-Contributions are welcome! Please read our (upcoming) `CONTRIBUTING.md` guide to learn how you can get involved.
+We welcome contributions! Please see our [Contributing Guidelines](CONTRIBUTING.md) for details on:
+
+- Development setup and workflow
+- Code style and testing requirements
+- Pull request process
+- Issue reporting
+
+### Quick Start for Contributors
+
+```bash
+# Fork and clone the repo
+git clone https://github.com/YOUR_USERNAME/conductor-gateway.git
+cd conductor-gateway
+
+# Set up development environment
+poetry install
+poetry run pre-commit install
+
+# Create feature branch
+git checkout -b feature/your-feature-name
+
+# Make changes and test
+poetry run pytest
+python run_tests.py
+
+# Submit pull request
+```
+
+## 📊 Performance
+
+- **Concurrent SSE Streams**: Supports multiple simultaneous streaming connections
+- **Background Processing**: Non-blocking agent execution with event queues
+- **Resource Efficient**: Memory-bounded queues prevent resource exhaustion
+- **Health Monitoring**: Built-in health checks and logging
+
+## 🔒 Security
+
+- **Bandit Security Scanning**: Automated vulnerability detection
+- **Input Validation**: Comprehensive payload validation
+- **CORS Configuration**: Configurable cross-origin policies
+- **Environment Isolation**: Secure configuration management
 
 ## 📄 License
 
-This project is licensed under the MIT License. See the `LICENSE` file for details.
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+## 🆘 Support
+
+- **Issues**: [GitHub Issues](https://github.com/primoia/conductor-gateway/issues)
+- **Discussions**: [GitHub Discussions](https://github.com/primoia/conductor-gateway/discussions)
+- **Documentation**: [Project Docs](docs/)
+
+## 🙏 Acknowledgments
+
+- Built with [FastAPI](https://fastapi.tiangolo.com/) for high-performance async APIs
+- Uses [Poetry](https://python-poetry.org/) for modern Python dependency management
+- Powered by [MCP](https://modelcontextprotocol.io/) for extensible tool integration
+- Quality assured with [Ruff](https://docs.astral.sh/ruff/), [MyPy](https://mypy.readthedocs.io/), and [Pytest](https://pytest.org/)
+
+---
+
+**Built with ❤️ by the Primoia team**
