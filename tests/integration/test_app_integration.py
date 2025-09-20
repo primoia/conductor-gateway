@@ -1,10 +1,11 @@
 """
 Integration tests for the complete application.
 """
+
 import asyncio
-import json
+from unittest.mock import AsyncMock, MagicMock, patch
+
 import pytest
-from unittest.mock import patch, AsyncMock, MagicMock
 from fastapi.testclient import TestClient
 from httpx import AsyncClient
 
@@ -13,7 +14,7 @@ from httpx import AsyncClient
 class TestApplicationLifespan:
     """Test application lifespan management."""
 
-    @patch('src.api.app.start_mcp_server')
+    @patch("src.api.app.start_mcp_server")
     def test_app_creation_without_mcp_startup(self, mock_start_mcp):
         """Test app creation without actually starting MCP server."""
         from src.api.app import create_app
@@ -23,7 +24,10 @@ class TestApplicationLifespan:
         # Verify app is created successfully
         assert app.title == "Conductor Gateway API"
         assert app.version == "3.1.0"
-        assert app.description == "Bridge service for integrating primoia-browse-use with conductor project"
+        assert (
+            app.description
+            == "Bridge service for integrating primoia-browse-use with conductor project"
+        )
 
         # Check that routes are registered
         routes = [route.path for route in app.routes]
@@ -32,7 +36,7 @@ class TestApplicationLifespan:
         assert "/api/v1/stream-execute" in routes
         assert "/api/v1/stream/{job_id}" in routes
 
-    @patch('src.api.app.start_mcp_server')
+    @patch("src.api.app.start_mcp_server")
     def test_cors_middleware_enabled(self, mock_start_mcp):
         """Test that CORS middleware is properly configured."""
         from src.api.app import create_app
@@ -48,9 +52,11 @@ class TestApplicationLifespan:
 class TestEndToEndExecution:
     """Test end-to-end execution flows."""
 
-    @patch('src.utils.mcp_utils.init_agent')
-    @patch('src.api.app.start_mcp_server')
-    def test_synchronous_execution_end_to_end(self, mock_start_mcp, mock_init_agent, sample_execution_payload):
+    @patch("src.utils.mcp_utils.init_agent")
+    @patch("src.api.app.start_mcp_server")
+    def test_synchronous_execution_end_to_end(
+        self, mock_start_mcp, mock_init_agent, sample_execution_payload
+    ):
         """Test complete synchronous execution flow."""
         # Setup mocks
         mock_agent = AsyncMock()
@@ -59,6 +65,7 @@ class TestEndToEndExecution:
 
         # Create app and client
         from src.api.app import create_app
+
         app = create_app()
 
         with TestClient(app) as client:
@@ -77,9 +84,11 @@ class TestEndToEndExecution:
             assert "mcpServers" in agent_config
             assert "http" in agent_config["mcpServers"]
 
-    @patch('src.utils.mcp_utils.init_agent')
-    @patch('src.api.app.start_mcp_server')
-    def test_streaming_execution_initialization(self, mock_start_mcp, mock_init_agent, sample_execution_payload):
+    @patch("src.utils.mcp_utils.init_agent")
+    @patch("src.api.app.start_mcp_server")
+    def test_streaming_execution_initialization(
+        self, mock_start_mcp, mock_init_agent, sample_execution_payload
+    ):
         """Test streaming execution initialization."""
         mock_agent = AsyncMock()
         mock_agent.run = AsyncMock(return_value="Streaming test result")
@@ -87,6 +96,7 @@ class TestEndToEndExecution:
         mock_init_agent.return_value = mock_agent
 
         from src.api.app import create_app
+
         app = create_app()
 
         with TestClient(app) as client:
@@ -99,8 +109,8 @@ class TestEndToEndExecution:
             assert data["status"] == "started"
             assert "/api/v1/stream/" in data["stream_url"]
 
-    @patch('src.utils.mcp_utils.init_agent')
-    @patch('src.api.app.start_mcp_server')
+    @patch("src.utils.mcp_utils.init_agent")
+    @patch("src.api.app.start_mcp_server")
     def test_multiple_payload_formats(self, mock_start_mcp, mock_init_agent):
         """Test that different payload formats work correctly."""
         mock_agent = AsyncMock()
@@ -108,22 +118,19 @@ class TestEndToEndExecution:
         mock_init_agent.return_value = mock_agent
 
         from src.api.app import create_app
+
         app = create_app()
 
         payloads = [
             {"textEntries": [{"content": "Text entry command"}]},
             {"input": "Input command"},
-            {"command": "Direct command"}
+            {"command": "Direct command"},
         ]
 
-        expected_commands = [
-            "Text entry command",
-            "Input command",
-            "Direct command"
-        ]
+        expected_commands = ["Text entry command", "Input command", "Direct command"]
 
         with TestClient(app) as client:
-            for payload, expected_cmd in zip(payloads, expected_commands):
+            for payload, expected_cmd in zip(payloads, expected_commands, strict=False):
                 mock_agent.run.reset_mock()
 
                 response = client.post("/execute", json=payload)
@@ -141,8 +148,8 @@ class TestEndToEndExecution:
 class TestSSEStreamingIntegration:
     """Test SSE streaming integration (marked as slow tests)."""
 
-    @patch('src.utils.mcp_utils.init_agent')
-    @patch('src.api.app.start_mcp_server')
+    @patch("src.utils.mcp_utils.init_agent")
+    @patch("src.api.app.start_mcp_server")
     @pytest.mark.asyncio
     async def test_sse_event_flow(self, mock_start_mcp, mock_init_agent, sample_execution_payload):
         """Test SSE event generation flow."""
@@ -152,6 +159,7 @@ class TestSSEStreamingIntegration:
         mock_init_agent.return_value = mock_agent
 
         from src.api.app import create_app
+
         app = create_app()
 
         async with AsyncClient(app=app, base_url="http://test") as client:
@@ -170,9 +178,11 @@ class TestSSEStreamingIntegration:
             assert stream_response.status_code == 200
             assert "text/event-stream" in stream_response.headers["content-type"]
 
-    @patch('src.utils.mcp_utils.init_agent')
-    @patch('src.api.app.start_mcp_server')
-    def test_concurrent_streaming_jobs(self, mock_start_mcp, mock_init_agent, sample_execution_payload):
+    @patch("src.utils.mcp_utils.init_agent")
+    @patch("src.api.app.start_mcp_server")
+    def test_concurrent_streaming_jobs(
+        self, mock_start_mcp, mock_init_agent, sample_execution_payload
+    ):
         """Test multiple concurrent streaming jobs."""
         mock_agent = AsyncMock()
         mock_agent.run = AsyncMock(return_value="Concurrent test result")
@@ -180,6 +190,7 @@ class TestSSEStreamingIntegration:
         mock_init_agent.return_value = mock_agent
 
         from src.api.app import create_app
+
         app = create_app()
 
         with TestClient(app) as client:
@@ -187,9 +198,7 @@ class TestSSEStreamingIntegration:
 
             # Start multiple jobs
             for i in range(3):
-                payload = {
-                    "textEntries": [{"content": f"Concurrent command {i}"}]
-                }
+                payload = {"textEntries": [{"content": f"Concurrent command {i}"}]}
                 response = client.post("/api/v1/stream-execute", json=payload)
                 assert response.status_code == 200
                 job_ids.append(response.json()["job_id"])
@@ -208,10 +217,11 @@ class TestSSEStreamingIntegration:
 class TestConfigurationIntegration:
     """Test configuration integration with the application."""
 
-    @patch('src.api.app.start_mcp_server')
+    @patch("src.api.app.start_mcp_server")
     def test_health_endpoint_shows_config_info(self, mock_start_mcp):
         """Test that health endpoint shows configuration information."""
         from src.api.app import create_app
+
         app = create_app()
 
         with TestClient(app) as client:
@@ -231,21 +241,23 @@ class TestConfigurationIntegration:
             assert ":8006" in data["endpoints"]["mcp"]
             assert ":5006" in data["endpoints"]["health"]
 
-    @patch.dict('os.environ', {
-        'CONDUCTOR_GATEWAY_HOST': 'test.example.com',
-        'CONDUCTOR_GATEWAY_PORT': '9999'
-    })
-    @patch('src.api.app.start_mcp_server')
+    @patch.dict(
+        "os.environ",
+        {"CONDUCTOR_GATEWAY_HOST": "test.example.com", "CONDUCTOR_GATEWAY_PORT": "9999"},
+    )
+    @patch("src.api.app.start_mcp_server")
     def test_environment_override_in_health(self, mock_start_mcp):
         """Test that environment variable overrides appear in health endpoint."""
         # Reload config with environment variables
-        with patch('src.config.settings.CONFIG_FILE', '/nonexistent/config.yaml'):
+        with patch("src.config.settings.CONFIG_FILE", "/nonexistent/config.yaml"):
             from src.config.settings import load_config
+
             config = load_config()
 
             # Patch SERVER_CONFIG to use the new config
-            with patch('src.config.settings.SERVER_CONFIG', config["server"]):
+            with patch("src.config.settings.SERVER_CONFIG", config["server"]):
                 from src.api.app import create_app
+
                 app = create_app()
 
                 with TestClient(app) as client:

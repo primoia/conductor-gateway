@@ -1,36 +1,33 @@
-import os
-import yaml
 import logging
+import os
 from pathlib import Path
+
+import yaml
 
 # Configure logging
 logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
+
 
 def load_config():
     """Load configuration from YAML file with environment variable overrides."""
     # Default configuration
     config = {
-        "server": {
-            "host": "0.0.0.0",
-            "port": 5006,
-            "mcp_port": 8006
-        },
+        "server": {"host": "0.0.0.0", "port": 5006, "mcp_port": 8006},
         "conductor": {
             "project_path": "/mnt/ramdisk/primoia-main/primoia-monorepo/projects/conductor",
             "scripts_path": "scripts",
-            "timeout": 300
-        }
+            "timeout": 300,
+        },
     }
 
     # Load from YAML file if it exists
     config_path = Path(__file__).parent.parent.parent / "config.yaml"
     if config_path.exists():
         try:
-            with open(config_path, 'r') as f:
+            with open(config_path) as f:
                 yaml_config = yaml.safe_load(f)
                 if yaml_config:
                     # Merge YAML config with defaults
@@ -42,15 +39,22 @@ def load_config():
         logger.info("No config.yaml found, using defaults")
 
     # Override with environment variables
-    config["server"]["host"] = os.getenv('HOST', config["server"]["host"])
-    config["server"]["port"] = int(os.getenv('PORT', config["server"]["port"]))
-    config["server"]["mcp_port"] = int(os.getenv('MCP_PORT', config["server"]["mcp_port"]))
+    config["server"]["host"] = os.getenv("HOST", config["server"]["host"])
+    config["server"]["port"] = int(os.getenv("PORT", config["server"]["port"]))
+    config["server"]["mcp_port"] = int(os.getenv("MCP_PORT", config["server"]["mcp_port"]))
 
-    config["conductor"]["project_path"] = os.getenv('CONDUCTOR_PROJECT_PATH', config["conductor"]["project_path"])
-    config["conductor"]["scripts_path"] = os.getenv('CONDUCTOR_SCRIPTS_PATH', config["conductor"]["scripts_path"])
-    config["conductor"]["timeout"] = int(os.getenv('CONDUCTOR_TIMEOUT', config["conductor"]["timeout"]))
+    config["conductor"]["project_path"] = os.getenv(
+        "CONDUCTOR_PROJECT_PATH", config["conductor"]["project_path"]
+    )
+    config["conductor"]["scripts_path"] = os.getenv(
+        "CONDUCTOR_SCRIPTS_PATH", config["conductor"]["scripts_path"]
+    )
+    config["conductor"]["timeout"] = int(
+        os.getenv("CONDUCTOR_TIMEOUT", config["conductor"]["timeout"])
+    )
 
     return config
+
 
 # Load configuration
 _config = load_config()
