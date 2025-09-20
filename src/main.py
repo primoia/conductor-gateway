@@ -7,8 +7,8 @@ import threading
 
 import uvicorn
 
-from api.app import create_app
-from config.settings import CONDUCTOR_CONFIG, SERVER_CONFIG
+from src.api.app import create_app
+from src.config.settings import CONDUCTOR_CONFIG, SERVER_CONFIG
 
 # Configure logging
 logging.basicConfig(

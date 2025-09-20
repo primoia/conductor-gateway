@@ -88,7 +88,7 @@ class TestImportStructure:
 
     def test_main_imports(self):
         """Test that main module imports work."""
-        with patch("src.main.start_mcp_server"):
+        with patch("src.api.app.create_app"):
             from src.main import main
 
             assert callable(main)

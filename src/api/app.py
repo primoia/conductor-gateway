@@ -15,8 +15,8 @@ from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
-from config.settings import SERVER_CONFIG
-from utils.mcp_utils import init_agent
+from src.config.settings import SERVER_CONFIG
+from src.utils.mcp_utils import init_agent
 
 logger = logging.getLogger(__name__)
 

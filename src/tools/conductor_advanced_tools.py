@@ -2,7 +2,7 @@ import logging
 import os
 import subprocess
 
-from config.settings import CONDUCTOR_CONFIG
+from src.config.settings import CONDUCTOR_CONFIG
 
 logger = logging.getLogger(__name__)
 
