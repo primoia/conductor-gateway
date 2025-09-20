@@ -43,7 +43,7 @@ class TestConductorAdvancedMCPServer:
         mock_tools = MagicMock()
         mock_tools_class.return_value = mock_tools
 
-        server = ConductorAdvancedMCPServer(port=8006)
+        ConductorAdvancedMCPServer(port=8006)
 
         # Verify that tool decorator was called for each expected tool
         expected_tools = [
@@ -83,7 +83,7 @@ class TestConductorAdvancedMCPServer:
         mock_tools = MagicMock()
         mock_tools_class.return_value = mock_tools
 
-        server = ConductorAdvancedMCPServer(port=8006)
+        ConductorAdvancedMCPServer(port=8006)
 
         # Get all tool call arguments
         tool_calls = [call.kwargs for call in mock_fastmcp.tool.call_args_list]
@@ -182,10 +182,10 @@ class TestMCPServerIntegration:
 
             mock_fastmcp.tool.side_effect = capture_tool_function
 
-            server = ConductorAdvancedMCPServer(port=8006)
+            ConductorAdvancedMCPServer(port=8006)
 
             # Find the captured functions
-            tool_functions = {name: func for name, func in decorated_functions}
+            tool_functions = dict(decorated_functions)
 
             # Verify that the tools' methods are bound correctly
             assert "list_available_agents" in tool_functions
