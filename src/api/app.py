@@ -255,7 +255,7 @@ def create_app() -> FastAPI:
 
                     # Format as SSE and yield
                     sse_data = json.dumps(event)
-                    yield f"data: {sse_data}\\n\\n"
+                    yield f"data: {sse_data}\n\n"
 
             except asyncio.CancelledError:
                 logger.info(f"SSE stream cancelled for job {job_id}")
@@ -268,7 +268,7 @@ def create_app() -> FastAPI:
                     "timestamp": time.time(),
                     "job_id": job_id,
                 }
-                yield f"data: {json.dumps(error_event)}\\n\\n"
+                yield f"data: {json.dumps(error_event)}\n\n"
             finally:
                 # Clean up
                 ACTIVE_STREAMS.pop(job_id, None)
