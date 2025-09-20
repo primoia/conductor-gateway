@@ -78,11 +78,13 @@ class TestImportStructure:
 
     def test_server_imports(self):
         """Test that server imports work."""
-        with patch("src.server.advanced_server.FastMCP"):
-            with patch("src.server.advanced_server.ConductorAdvancedTools"):
-                from src.server.advanced_server import ConductorAdvancedMCPServer
+        with (
+            patch("src.server.advanced_server.FastMCP"),
+            patch("src.server.advanced_server.ConductorAdvancedTools"),
+        ):
+            from src.server.advanced_server import ConductorAdvancedMCPServer
 
-                assert ConductorAdvancedMCPServer is not None
+            assert ConductorAdvancedMCPServer is not None
 
     def test_main_imports(self):
         """Test that main module imports work."""

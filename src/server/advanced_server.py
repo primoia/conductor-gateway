@@ -27,7 +27,7 @@ class ConductorAdvancedMCPServer:
         self.mcp.tool(
             name="list_available_agents",
             description="""Lists all available agents in the Conductor system.
-            
+
             Returns a list of all agents with their capabilities and tags.""",
         )(self.advanced_tools.list_available_agents)
 
@@ -37,7 +37,7 @@ class ConductorAdvancedMCPServer:
             description="""Get detailed information about a specific agent.
             Parameters:
             - agent_id: The ID of the agent to get information for
-            
+
             Returns complete agent information including capabilities, tags, and status.""",
         )(self.advanced_tools.get_agent_info)
 
@@ -45,7 +45,7 @@ class ConductorAdvancedMCPServer:
         self.mcp.tool(
             name="validate_conductor_system",
             description="""Validate the Conductor system configuration.
-            
+
             Returns validation results and any configuration issues.""",
         )(self.advanced_tools.validate_conductor_system)
 
@@ -60,7 +60,7 @@ class ConductorAdvancedMCPServer:
             - input_text: The input text for the agent
             - timeout: Execution timeout in seconds (default: 120)
             - output_format: Output format - 'text' or 'json' (default: 'text')
-            
+
             Returns the agent's response without maintaining conversation history.""",
         )(self.advanced_tools.execute_agent_stateless)
 
@@ -73,7 +73,7 @@ class ConductorAdvancedMCPServer:
             - input_text: The input text for the agent
             - timeout: Execution timeout in seconds (default: 120)
             - clear_history: Whether to clear conversation history (default: False)
-            
+
             Returns the agent's response while maintaining conversation context.""",
         )(self.advanced_tools.execute_agent_contextual)
 
@@ -85,7 +85,7 @@ class ConductorAdvancedMCPServer:
             - agent_id: The ID of the agent to start session with
             - initial_input: Optional initial input for the session
             - timeout: Session timeout in seconds (default: 120)
-            
+
             Returns session initialization result.""",
         )(self.advanced_tools.start_interactive_session)
 
@@ -97,7 +97,7 @@ class ConductorAdvancedMCPServer:
             description="""Install agent templates.
             Parameters:
             - template_name: Name of template to install (optional, lists available if not provided)
-            
+
             Returns installation results or list of available templates.""",
         )(self.advanced_tools.install_agent_templates)
 
@@ -107,7 +107,7 @@ class ConductorAdvancedMCPServer:
             description="""Backup all agents.
             Parameters:
             - backup_path: Optional path for backup (uses default if not provided)
-            
+
             Returns backup operation results.""",
         )(self.advanced_tools.backup_agents)
 
@@ -117,7 +117,7 @@ class ConductorAdvancedMCPServer:
             description="""Restore agents from backup.
             Parameters:
             - backup_path: Path to the backup to restore from
-            
+
             Returns restore operation results.""",
         )(self.advanced_tools.restore_agents)
 
@@ -130,7 +130,7 @@ class ConductorAdvancedMCPServer:
             - to_type: Target storage type ('filesystem' or 'mongodb')
             - path: Optional path for migration
             - no_config_update: Whether to skip config file update (default: False)
-            
+
             Returns migration operation results.""",
         )(self.advanced_tools.migrate_storage)
 
@@ -143,7 +143,7 @@ class ConductorAdvancedMCPServer:
             Parameters:
             - environment: Environment name to set
             - project: Optional project name
-            
+
             Returns environment setting results.""",
         )(self.advanced_tools.set_environment)
 
@@ -151,7 +151,7 @@ class ConductorAdvancedMCPServer:
         self.mcp.tool(
             name="get_system_config",
             description="""Get current system configuration.
-            
+
             Returns the contents of the config.yaml file.""",
         )(self.advanced_tools.get_system_config)
 
@@ -161,7 +161,7 @@ class ConductorAdvancedMCPServer:
             description="""Clear conversation history for a specific agent.
             Parameters:
             - agent_id: The ID of the agent to clear history for
-            
+
             Returns history clearing results.""",
         )(self.advanced_tools.clear_agent_history)
 
