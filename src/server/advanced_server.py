@@ -11,7 +11,7 @@ class ConductorAdvancedMCPServer:
     """Advanced MCP Server for Conductor Gateway with full Conductor CLI support."""
 
     def __init__(self, port: int):
-        self.mcp = FastMCP(name="ConductorAdvancedMCP")
+        self.mcp = FastMCP(name="ConductorAdvancedMCP", port=port)
         self.port = port
         self.advanced_tools = ConductorAdvancedTools()
         self._register_advanced_tools()
