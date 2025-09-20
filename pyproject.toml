@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Conductor Gateway - Autonomous MCP Server"
 authors = ["Primoia Team"]
 readme = "README.md"
-packages = [{include = ".", from = "src"}]
+package-mode = false
 
 [tool.poetry.dependencies]
 python = "^3.11"
