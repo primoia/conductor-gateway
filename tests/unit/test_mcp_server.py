@@ -29,8 +29,8 @@ class TestConductorAdvancedMCPServer:
         assert server.mcp == mock_fastmcp
         assert server.advanced_tools == mock_tools
 
-        # Verify FastMCP was initialized with correct name
-        mock_fastmcp_class.assert_called_once_with(name="ConductorAdvancedMCP")
+        # Verify FastMCP was initialized with correct name and port
+        mock_fastmcp_class.assert_called_once_with(name="ConductorAdvancedMCP", port=8006)
 
     @patch("src.server.advanced_server.FastMCP")
     @patch("src.server.advanced_server.ConductorAdvancedTools")
