@@ -20,7 +20,7 @@ COPY src/ ./src/
 
 # Set environment variables
 ENV PATH="/app/.venv/bin:$PATH"
-ENV PYTHONPATH="/app/src"
+ENV PYTHONPATH="/app"
 
 # Create non-root user for security
 RUN groupadd -r appuser && useradd -r -g appuser appuser
