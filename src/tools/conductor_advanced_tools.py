@@ -83,27 +83,27 @@ class ConductorAdvancedTools:
         result = self._call_conductor_api(endpoint="/agents", method="GET")
         return self._format_response(result)
 
-    # Os outros métodos (execute_agent_stateless, etc.) precisarão ser adaptados
-    # para chamar os endpoints correspondentes na Conductor API.
-    # Por enquanto, vamos focar apenas no list_available_agents para validar a comunicação.
-    # Os demais métodos serão implementados em fases futuras, à medida que os endpoints
-    # correspondentes forem criados na Conductor API.
-
-    # Exemplo de como seria um execute_agent_stateless (requer endpoint POST /agents/execute)
-    # def execute_agent_stateless(self, agent_id: str, input_text: str, timeout: int = 120) -> dict:
-    #     payload = {
-    #         "agent_id": agent_id,
-    #         "input_text": input_text,
-    #         "timeout": timeout
-    #     }
-    #     result = self._call_conductor_api(endpoint="/agents/execute", method="POST", payload=payload, timeout=timeout)
-    #     return result
-
-    # Para este plano, vamos manter apenas o list_available_agents e o test_claude_execution
-    # para validar a comunicação.
-    def execute_summary_via_mongo(self) -> str:
+    def execute_agent_stateless(self, agent_id: str, input_text: str, cwd: str, timeout: int = 300) -> dict:
         """
-        Chama o endpoint de teste de execução de resumo via MongoDB na Conductor API.
+        Executa um agente na Conductor API usando o endpoint genérico.
         """
-        result = self._call_conductor_api(endpoint="/agents/execute-summary-via-mongo", method="POST", timeout=300)
-        return self._format_response(result)
+        if not agent_id or not input_text or not cwd:
+            return {"status": "error", "stderr": "agent_id, input_text e cwd são obrigatórios"}
+
+        endpoint = f"/agents/{agent_id}/execute"
+        payload = {
+            "user_input": input_text,
+            "cwd": cwd,
+            "timeout": timeout
+        }
+
+        # O timeout da chamada de rede deve ser maior que o timeout da tarefa
+        network_timeout = timeout + 20
+
+        result = self._call_conductor_api(
+            endpoint=endpoint,
+            method="POST",
+            payload=payload,
+            timeout=network_timeout
+        )
+        return result
