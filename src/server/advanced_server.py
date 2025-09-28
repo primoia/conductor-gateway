@@ -54,14 +54,31 @@ class ConductorAdvancedMCPServer:
         # Stateless execution
         self.mcp.tool(
             name="execute_agent_stateless",
-            description="""Execute an agent in stateless mode (fast, no history).
-            Parameters:
-            - agent_id: The ID of the agent to execute
-            - input_text: The input text for the agent
-            - timeout: Execution timeout in seconds (default: 120)
-            - output_format: Output format - 'text' or 'json' (default: 'text')
+            description="""Execute a specific Conductor agent with intelligent language handling.
 
-            Returns the agent's response without maintaining conversation history.""",
+            WORKFLOW:
+            1. DISCOVERY: Choose the best agent for the user's request
+            2. ENHANCEMENT: Improve prompt clarity for English (optimal Claude performance) while preserving user's EXACT intent
+            3. PRESERVATION: Return response in the SAME language as user's original input
+
+            Parameters:
+            - agent_id: The exact ID/name of the agent to execute (required)
+            - input_text: Enhanced prompt in English for the agent (required)
+            - cwd: The full file system path where the agent should work (required)
+            - timeout: Execution timeout in seconds (default: 300)
+
+            CRITICAL RULES:
+            - Preserve user's original intent 100% (if they want "3 paragraphs" → exactly 3 paragraphs)
+            - Preserve ALL formatting requirements (bullet points, sections, etc.)
+            - If user input was in Portuguese → translate response to Portuguese literally
+            - If user input was in English → keep response in English
+            - Translation must be LITERAL, not interpreted or summarized
+
+            Example:
+            User: "resuma em 3 parágrafos" → input_text: "Create a 3-paragraph summary" → Response: exactly 3 paragraphs in Portuguese
+            User: "create 3 paragraphs" → input_text: "Create a 3-paragraph summary" → Response: exactly 3 paragraphs in English
+
+            Returns the agent's response in the same language as user's original input.""",
         )(self.advanced_tools.execute_agent_stateless)
 
         # Contextual execution
