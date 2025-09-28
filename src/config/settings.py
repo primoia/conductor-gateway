@@ -20,6 +20,7 @@ def load_config():
             "project_path": "/mnt/ramdisk/primoia-main/primoia-monorepo/projects/conductor",
             "scripts_path": "scripts",
             "timeout": 300,
+            "conductor_api_url": "http://conductor-api:8000",
         },
     }
 
@@ -51,6 +52,9 @@ def load_config():
     )
     config["conductor"]["timeout"] = int(
         os.getenv("CONDUCTOR_TIMEOUT", config["conductor"]["timeout"])
+    )
+    config["conductor"]["conductor_api_url"] = os.getenv(
+        "CONDUCTOR_API_URL", config["conductor"]["conductor_api_url"]
     )
 
     return config
