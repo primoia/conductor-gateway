@@ -28,7 +28,7 @@ def start_mcp_server():
     """Starts MCP server in a separate thread."""
     try:
         logger.info("Starting MCP server thread...")
-        from server.advanced_server import ConductorAdvancedMCPServer
+        from src.server.advanced_server import ConductorAdvancedMCPServer
 
         server = ConductorAdvancedMCPServer(port=SERVER_CONFIG["mcp_port"])
         server.run(transport="sse")

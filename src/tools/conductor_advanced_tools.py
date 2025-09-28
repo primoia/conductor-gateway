@@ -79,22 +79,27 @@ class ConductorAdvancedTools:
             return f"❌ Erro ao processar resposta: {str(result)[:200]}..."
 
     def list_available_agents(self) -> str:
-        """Lista todos os agentes disponíveis na Conductor API."""
-        result = self._call_conductor_api(endpoint="/agents", method="GET")
+        """Lista todos os agentes disponíveis usando API genérica."""
+        endpoint = "/conductor/execute"
+        payload = {"list_agents": True}
+        result = self._call_conductor_api(endpoint=endpoint, method="POST", payload=payload)
         return self._format_response(result)
 
     def execute_agent_stateless(self, agent_id: str, input_text: str, cwd: str, timeout: int = 300) -> dict:
         """
-        Executa um agente na Conductor API usando o endpoint genérico.
+        Executa um agente usando o endpoint genérico do Conductor CLI.
+        Preserva o input original do usuário.
         """
         if not agent_id or not input_text or not cwd:
             return {"status": "error", "stderr": "agent_id, input_text e cwd são obrigatórios"}
 
-        endpoint = f"/agents/{agent_id}/execute"
+        endpoint = "/conductor/execute"
         payload = {
-            "user_input": input_text,
+            "agent_id": agent_id,
+            "input_text": input_text,  # Preserva input original
             "cwd": cwd,
-            "timeout": timeout
+            "timeout": timeout,
+            "chat": False  # Modo stateless
         }
 
         # O timeout da chamada de rede deve ser maior que o timeout da tarefa
@@ -107,3 +112,94 @@ class ConductorAdvancedTools:
             timeout=network_timeout
         )
         return result
+
+    def get_agent_info(self, agent_id: str) -> str:
+        """Obtém informações detalhadas de um agente específico usando API genérica."""
+        endpoint = "/conductor/execute"
+        payload = {"info_agent": agent_id}
+        result = self._call_conductor_api(endpoint=endpoint, method="POST", payload=payload)
+        return self._format_response(result)
+
+    def validate_conductor_system(self) -> str:
+        """Valida a configuração completa do sistema Conductor usando API genérica."""
+        endpoint = "/conductor/execute"
+        payload = {"validate": True}
+        result = self._call_conductor_api(endpoint=endpoint, method="POST", payload=payload)
+        return self._format_response(result)
+
+    def execute_agent_contextual(self, agent_id: str, input_text: str, timeout: int = 120, clear_history: bool = False) -> dict:
+        """Executa um agente mantendo contexto de conversação usando API genérica."""
+        endpoint = "/conductor/execute"
+        payload = {
+            "agent_id": agent_id,
+            "input_text": input_text,  # Preserva input original
+            "timeout": timeout,
+            "chat": True,  # Modo contextual
+            "clear_history": clear_history
+        }
+        result = self._call_conductor_api(endpoint=endpoint, method="POST", payload=payload, timeout=timeout + 20)
+        return result
+
+    def start_interactive_session(self, agent_id: str, initial_input: str = None, timeout: int = 120) -> dict:
+        """Inicia uma sessão interativa com um agente usando API genérica."""
+        endpoint = "/conductor/execute"
+        payload = {
+            "agent_id": agent_id,
+            "input_text": initial_input or "Iniciar sessão interativa",
+            "timeout": timeout,
+            "chat": True,
+            "interactive": True
+        }
+        result = self._call_conductor_api(endpoint=endpoint, method="POST", payload=payload)
+        return result
+
+    def install_agent_templates(self, template_name: str = None) -> str:
+        """Instala templates de agentes ou lista templates disponíveis usando API genérica."""
+        endpoint = "/conductor/execute"
+        if template_name:
+            payload = {"install": template_name}
+        else:
+            payload = {"install": "list"}  # Lista templates disponíveis
+        result = self._call_conductor_api(endpoint=endpoint, method="POST", payload=payload)
+        return self._format_response(result)
+
+    def backup_agents(self, backup_path: str = None) -> str:
+        """Faz backup de todos os agentes usando API genérica."""
+        endpoint = "/conductor/execute"
+        payload = {"backup": True}
+        result = self._call_conductor_api(endpoint=endpoint, method="POST", payload=payload)
+        return self._format_response(result)
+
+    def restore_agents(self, backup_path: str) -> str:
+        """Restaura agentes de um backup usando API genérica."""
+        endpoint = "/conductor/execute"
+        payload = {"restore": backup_path}
+        result = self._call_conductor_api(endpoint=endpoint, method="POST", payload=payload)
+        return self._format_response(result)
+
+    def migrate_storage(self, from_type: str, to_type: str, path: str = None, no_config_update: bool = False) -> str:
+        """Migra storage entre filesystem e MongoDB."""
+        payload = {
+            "from_type": from_type,
+            "to_type": to_type,
+            "path": path,
+            "no_config_update": no_config_update
+        }
+        result = self._call_conductor_api(endpoint="/system/migrate", method="POST", payload=payload)
+        return self._format_response(result)
+
+    def set_environment(self, environment: str, project: str = None) -> str:
+        """Define ambiente e contexto do projeto."""
+        payload = {"environment": environment, "project": project}
+        result = self._call_conductor_api(endpoint="/system/environment", method="POST", payload=payload)
+        return self._format_response(result)
+
+    def get_system_config(self) -> str:
+        """Obtém a configuração atual do sistema."""
+        result = self._call_conductor_api(endpoint="/system/config", method="GET")
+        return self._format_response(result)
+
+    def clear_agent_history(self, agent_id: str) -> str:
+        """Limpa o histórico de conversação de um agente."""
+        result = self._call_conductor_api(endpoint=f"/sessions/{agent_id}/history", method="DELETE")
+        return self._format_response(result)
