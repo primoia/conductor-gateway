@@ -17,6 +17,7 @@ RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
 # Copy virtual environment and code
 COPY --from=builder /app/.venv ./.venv
 COPY src/ ./src/
+COPY config.yaml ./
 
 # Set environment variables
 ENV PATH="/app/.venv/bin:$PATH"
