@@ -28,7 +28,7 @@ def start_mcp_server():
     """Starts MCP server in a separate thread."""
     try:
         logger.info("Starting MCP server thread...")
-        from server.advanced_server import ConductorAdvancedMCPServer
+        from src.server.advanced_server import ConductorAdvancedMCPServer
 
         server = ConductorAdvancedMCPServer(port=SERVER_CONFIG["mcp_port"])
         server.run(transport="sse")
@@ -322,6 +322,41 @@ def create_app() -> FastAPI:
 
         except Exception as e:
             logger.error(f"Error executing command: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.post("/execute-agent")
+    async def execute_agent(payload: dict[str, Any]):
+        """Direct endpoint to execute agent via Conductor API."""
+        try:
+            from src.tools.conductor_advanced_tools import ConductorAdvancedTools
+
+            # Extract parameters
+            agent_id = payload.get("agent_id")
+            input_text = payload.get("input_text")
+            cwd = payload.get("cwd")
+            timeout = payload.get("timeout", 300)
+
+            if not agent_id or not input_text or not cwd:
+                raise HTTPException(
+                    status_code=400,
+                    detail="agent_id, input_text e cwd são obrigatórios"
+                )
+
+            logger.info(f"Executing agent {agent_id} with input: {input_text[:100]}...")
+
+            # Initialize conductor tools and execute
+            conductor_tools = ConductorAdvancedTools()
+            result = conductor_tools.execute_agent_stateless(
+                agent_id=agent_id,
+                input_text=input_text,
+                cwd=cwd,
+                timeout=timeout
+            )
+
+            return result
+
+        except Exception as e:
+            logger.error(f"Error executing agent: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail=str(e))
 
     @app.get("/health")
