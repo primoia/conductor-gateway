@@ -10,13 +10,14 @@ logger = logging.getLogger(__name__)
 class ConductorAdvancedMCPServer:
     """Advanced MCP Server for Conductor Gateway with full Conductor CLI support."""
 
-    def __init__(self, port: int):
-        self.mcp = FastMCP(name="ConductorAdvancedMCP", port=port)
+    def __init__(self, port: int, host: str = "0.0.0.0"):
+        self.mcp = FastMCP(name="ConductorAdvancedMCP", port=port, host=host)
         self.port = port
+        self.host = host
         self.advanced_tools = ConductorAdvancedTools()
         self._register_advanced_tools()
 
-        logger.info(f"ConductorAdvancedMCPServer initialized on port {port}")
+        logger.info(f"ConductorAdvancedMCPServer initialized on {host}:{port}")
 
     def _register_advanced_tools(self):
         """Register all advanced tools with the MCP server."""
@@ -188,7 +189,7 @@ class ConductorAdvancedMCPServer:
         """Start the advanced MCP server."""
         try:
             logger.info(
-                f"Starting advanced MCP server on port {self.port} with {transport} transport"
+                f"Starting advanced MCP server on {self.host}:{self.port} with {transport} transport"
             )
             self.mcp.run(transport=transport)
         except Exception as e:
