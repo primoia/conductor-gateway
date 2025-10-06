@@ -5,17 +5,19 @@ FastAPI Application for Conductor Gateway with SSE Support
 import asyncio
 import json
 import logging
+import os
 import threading
 import time
 import uuid
 from contextlib import asynccontextmanager
 from typing import Any
 
+import httpx
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
-from src.config.settings import SERVER_CONFIG
+from src.config.settings import CONDUCTOR_CONFIG, SERVER_CONFIG
 from src.utils.mcp_utils import init_agent
 
 logger = logging.getLogger(__name__)
@@ -322,6 +324,37 @@ def create_app() -> FastAPI:
 
         except Exception as e:
             logger.error(f"Error executing command: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.post("/conductor/execute")
+    async def conductor_proxy(payload: dict[str, Any]):
+        """
+        Proxy endpoint for Conductor API - accessible from outside Docker.
+        This allows MCP tools to call http://localhost:5006/conductor/execute
+        instead of internal http://conductor-api:8000/conductor/execute
+        """
+        try:
+            # Get internal conductor-api URL
+            conductor_api_url = CONDUCTOR_CONFIG.get("conductor_api_url", "http://conductor-api:8000")
+            url = f"{conductor_api_url}/conductor/execute"
+
+            logger.info(f"Proxying to {url}, payload: {str(payload)[:150]}...")
+
+            # Forward request to internal conductor-api with custom timeout
+            timeout_value = payload.get("timeout", 300)
+            async with httpx.AsyncClient(timeout=httpx.Timeout(timeout_value + 10)) as client:
+                response = await client.post(url, json=payload)
+                response.raise_for_status()
+                return response.json()
+
+        except httpx.HTTPStatusError as e:
+            logger.error(f"HTTP error from conductor-api: {e}")
+            raise HTTPException(status_code=e.response.status_code, detail=e.response.text)
+        except httpx.RequestError as e:
+            logger.error(f"Request error to conductor-api: {e}")
+            raise HTTPException(status_code=503, detail=f"Conductor API unavailable: {str(e)}")
+        except Exception as e:
+            logger.error(f"Error proxying to conductor-api: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail=str(e))
 
     @app.post("/execute-agent")
