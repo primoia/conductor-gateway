@@ -10,9 +10,22 @@ logger = logging.getLogger(__name__)
 class ConductorAdvancedTools:
     """Advanced tools for interacting with the Conductor project via its API."""
 
-    def __init__(self):
-        # A URL da API do Conductor será obtida das configurações
-        self.conductor_api_url = CONDUCTOR_CONFIG.get("conductor_api_url", "http://conductor-api:8000")
+    def __init__(self, use_gateway_proxy: bool = True):
+        """
+        Initialize Conductor tools.
+
+        Args:
+            use_gateway_proxy: If True, use localhost:5006/conductor/execute (gateway proxy).
+                             If False, use internal conductor-api:8000 directly.
+                             Default True for MCP tools to work from outside Docker.
+        """
+        if use_gateway_proxy:
+            # Use gateway proxy - accessible from outside Docker (Gemini MCP)
+            self.conductor_api_url = "http://localhost:5006"
+        else:
+            # Use internal API directly - only works inside Docker network
+            self.conductor_api_url = CONDUCTOR_CONFIG.get("conductor_api_url", "http://conductor-api:8000")
+
         self.timeout = CONDUCTOR_CONFIG.get("timeout", 300) # Timeout padrão para chamadas à API
 
         logger.info(f"ConductorAdvancedTools inicializado com API URL: {self.conductor_api_url}")
