@@ -22,6 +22,10 @@ def load_config():
             "timeout": 300,
             "conductor_api_url": "http://conductor-api:8000",
         },
+        "mongodb": {
+            "url": os.getenv("MONGODB_URL", "mongodb://admin:czrimr@mongodb:27017/?authSource=admin"),
+            "database": "conductor",
+        },
     }
 
     # Load from YAML file if it exists
@@ -57,6 +61,9 @@ def load_config():
         "CONDUCTOR_API_URL", config["conductor"]["conductor_api_url"]
     )
 
+    config["mongodb"]["url"] = os.getenv("MONGODB_URL", config["mongodb"]["url"])
+    config["mongodb"]["database"] = os.getenv("MONGODB_DATABASE", config["mongodb"]["database"])
+
     return config
 
 
@@ -66,7 +73,9 @@ _config = load_config()
 # Extract configurations for backward compatibility
 SERVER_CONFIG = _config["server"]
 CONDUCTOR_CONFIG = _config["conductor"]
+MONGODB_CONFIG = _config["mongodb"]
 
 logger.info(f"Server will run on {SERVER_CONFIG['host']}:{SERVER_CONFIG['port']}")
 logger.info(f"MCP server will run on port {SERVER_CONFIG['mcp_port']}")
 logger.info(f"Conductor project path: {CONDUCTOR_CONFIG['project_path']}")
+logger.info(f"MongoDB: {MONGODB_CONFIG['url']}/{MONGODB_CONFIG['database']}")

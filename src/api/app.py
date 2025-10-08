@@ -10,20 +10,30 @@ import threading
 import time
 import uuid
 from contextlib import asynccontextmanager
+from datetime import datetime
 from typing import Any
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+from pymongo import MongoClient
 
-from src.config.settings import CONDUCTOR_CONFIG, SERVER_CONFIG
+from src.clients.conductor_client import ConductorClient
+from src.config.settings import CONDUCTOR_CONFIG, MONGODB_CONFIG, SERVER_CONFIG
 from src.utils.mcp_utils import init_agent
 
 logger = logging.getLogger(__name__)
 
 # SSE Stream Manager - Global dictionary to manage active streams
 ACTIVE_STREAMS: dict[str, asyncio.Queue] = {}
+
+# MongoDB client - will be initialized in lifespan
+mongo_client: MongoClient | None = None
+mongo_db = None
+
+# Conductor API client - will be initialized in lifespan
+conductor_client: ConductorClient | None = None
 
 
 def start_mcp_server():
@@ -161,8 +171,32 @@ async def run_agent_with_queue(job_id: str, payload: dict[str, Any], queue: asyn
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan event handler for FastAPI."""
+    global mongo_client, mongo_db, conductor_client
+
     # Startup
     logger.info("Conductor Gateway API starting up...")
+
+    # Initialize MongoDB connection
+    try:
+        mongo_client = MongoClient(MONGODB_CONFIG["url"])
+        mongo_db = mongo_client[MONGODB_CONFIG["database"]]
+        # Test connection
+        mongo_client.admin.command("ping")
+        logger.info(f"Connected to MongoDB: {MONGODB_CONFIG['url']}/{MONGODB_CONFIG['database']}")
+
+        # Create indexes for agent_instances collection
+        agent_instances = mongo_db["agent_instances"]
+        agent_instances.create_index("instance_id", unique=True)
+        logger.info("Created index on agent_instances.instance_id")
+    except Exception as e:
+        logger.error(f"Failed to connect to MongoDB: {e}")
+        mongo_client = None
+        mongo_db = None
+
+    # Initialize Conductor API client
+    conductor_api_url = CONDUCTOR_CONFIG.get("conductor_api_url", "http://conductor-api:8000")
+    conductor_client = ConductorClient(base_url=conductor_api_url)
+    logger.info(f"Initialized ConductorClient with URL: {conductor_api_url}")
 
     # Start MCP server in daemon thread
     mcp_thread = threading.Thread(target=start_mcp_server, daemon=True, name="MCP-Server-Thread")
@@ -175,6 +209,16 @@ async def lifespan(app: FastAPI):
 
     # Shutdown
     logger.info("Conductor Gateway API shutting down...")
+
+    # Close Conductor client
+    if conductor_client:
+        await conductor_client.close()
+        logger.info("ConductorClient closed")
+
+    # Close MongoDB connection
+    if mongo_client:
+        mongo_client.close()
+        logger.info("MongoDB connection closed")
 
 
 def create_app() -> FastAPI:
@@ -407,5 +451,148 @@ def create_app() -> FastAPI:
                 "health": f"http://{SERVER_CONFIG['host']}:{SERVER_CONFIG['port']}/health",
             },
         }
+
+    # Agent Management Endpoints
+
+    @app.get("/api/agents")
+    async def list_agents():
+        """List all available agents from MongoDB."""
+        if mongo_db is None:
+            raise HTTPException(status_code=503, detail="MongoDB connection not available")
+
+        try:
+            agents_collection = mongo_db["agents"]
+            agents_cursor = agents_collection.find({})
+
+            agents = []
+            for agent in agents_cursor:
+                # Suportar schema completo (conductor_state) e simples (fallback)
+                if 'agent_id' in agent and 'definition' in agent:
+                    # Schema completo
+                    definition = agent.get('definition', {})
+                    agents.append({
+                        "id": str(agent.get("_id", "")),
+                        "agent_id": agent.get("agent_id", ""),
+                        "name": definition.get("name", ""),
+                        "emoji": definition.get("emoji", "🤖"),
+                        "description": definition.get("description", ""),
+                        "model": definition.get("model", "claude"),
+                        "tags": definition.get("tags", [])
+                    })
+                else:
+                    # Schema simples (fallback)
+                    agents.append({
+                        "id": str(agent.get("_id", "")),
+                        "agent_id": agent.get("name", ""),
+                        "name": agent.get("name", ""),
+                        "emoji": agent.get("emoji", "🤖"),
+                        "description": agent.get("prompt", "")[:100] + "..." if len(agent.get("prompt", "")) > 100 else agent.get("prompt", ""),
+                        "model": agent.get("model", "claude"),
+                        "tags": []
+                    })
+
+            logger.info(f"Retrieved {len(agents)} agents from MongoDB")
+            return agents
+
+        except Exception as e:
+            logger.error(f"Error listing agents: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.post("/api/agents/{agent_id}/execute")
+    async def execute_agent_by_id(agent_id: str, payload: dict[str, Any]):
+        """
+        Execute a specific agent with input text and optional instance_id for context isolation.
+
+        Payload format:
+        {
+            "input_text": "Text to process",
+            "instance_id": "uuid-optional",
+            "context_mode": "stateful|stateless",
+            "document_id": "optional-document-id",
+            "position": {"x": 100, "y": 200}
+        }
+        """
+        if mongo_db is None:
+            raise HTTPException(status_code=503, detail="MongoDB connection not available")
+
+        if not conductor_client:
+            raise HTTPException(status_code=503, detail="Conductor client not available")
+
+        try:
+            # Validate payload
+            input_text = payload.get("input_text")
+            instance_id = payload.get("instance_id")
+            context_mode = payload.get("context_mode", "stateless")
+            document_id = payload.get("document_id")
+            position = payload.get("position")
+
+            if not input_text:
+                raise HTTPException(status_code=400, detail="input_text is required")
+
+            logger.info(
+                f"Executing agent {agent_id} with instance_id: {instance_id}, "
+                f"context_mode: {context_mode}"
+            )
+
+            # Get agent from MongoDB to verify it exists
+            agents_collection = mongo_db["agents"]
+            agent = agents_collection.find_one({"name": agent_id})
+
+            if not agent:
+                raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found")
+
+            # Execute the agent via Conductor API
+            response = await conductor_client.execute_agent(
+                agent_name=agent["name"],
+                prompt=input_text,
+                instance_id=instance_id,
+                context_mode=context_mode,
+                cwd=CONDUCTOR_CONFIG.get("project_path"),
+                timeout=CONDUCTOR_CONFIG.get("timeout", 300),
+            )
+
+            # Save/update metadata for instance (if instance_id provided)
+            if instance_id:
+                agent_instances = mongo_db["agent_instances"]
+                update_data = {
+                    "agent_id": agent_id,
+                    "last_execution": datetime.now().isoformat(),
+                }
+
+                # Add optional fields if provided
+                if document_id:
+                    update_data["document_id"] = document_id
+                if position:
+                    update_data["position"] = position
+
+                # Check if this is first execution
+                existing = agent_instances.find_one({"instance_id": instance_id})
+                if not existing:
+                    update_data["created_at"] = datetime.now().isoformat()
+
+                agent_instances.update_one(
+                    {"instance_id": instance_id}, {"$set": update_data}, upsert=True
+                )
+
+                logger.info(f"Updated metadata for instance {instance_id}")
+
+            return {
+                "status": "success",
+                "result": response,
+                "instance_id": instance_id,
+                "context_mode": context_mode,
+            }
+
+        except HTTPException:
+            raise
+        except httpx.HTTPStatusError as e:
+            logger.error(f"Conductor API error: {e.response.status_code} - {e.response.text}")
+            raise HTTPException(
+                status_code=e.response.status_code,
+                detail=f"Conductor API error: {e.response.text}",
+            )
+        except Exception as e:
+            logger.error(f"Error executing agent {agent_id}: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail=str(e))
 
     return app
