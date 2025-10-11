@@ -566,6 +566,7 @@ def create_app() -> FastAPI:
             context_mode = payload.get("context_mode", "stateless")
             document_id = payload.get("document_id")
             position = payload.get("position")
+            cwd = payload.get("cwd")  # Extract cwd from payload
 
             logger.info("=" * 80)
             logger.info(f"📥 [GATEWAY] Requisição recebida em /api/agents/{agent_id}/execute")
@@ -573,6 +574,7 @@ def create_app() -> FastAPI:
             logger.info(f"   - instance_id: {instance_id}")
             logger.info(f"   - input_text: {input_text[:100] if input_text else None}...")
             logger.info(f"   - context_mode: {context_mode}")
+            logger.info(f"   - cwd: {cwd or 'não fornecido (usará default)'}")
             logger.info(f"   - Payload completo: {payload}")
             logger.info("=" * 80)
 
@@ -597,10 +599,14 @@ def create_app() -> FastAPI:
             # Get the actual agent_id for consistent referencing
             actual_agent_id = agent.get("agent_id") or agent.get("name")
 
+            # Use cwd from payload if provided, otherwise use default from config
+            final_cwd = cwd or CONDUCTOR_CONFIG.get("project_path")
+
             logger.info(f"🚀 [GATEWAY] Chamando conductor_client.execute_agent():")
             logger.info(f"   - agent_name: {agent.get('name') or agent_id}")
             logger.info(f"   - instance_id: {instance_id}")
             logger.info(f"   - context_mode: {context_mode}")
+            logger.info(f"   - cwd final: {final_cwd}")
 
             # Execute the agent via Conductor API
             response = await conductor_client.execute_agent(
@@ -608,7 +614,7 @@ def create_app() -> FastAPI:
                 prompt=input_text,
                 instance_id=instance_id,
                 context_mode=context_mode,
-                cwd=CONDUCTOR_CONFIG.get("project_path"),
+                cwd=final_cwd,
                 timeout=CONDUCTOR_CONFIG.get("timeout", 300),
             )
 
