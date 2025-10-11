@@ -63,28 +63,38 @@ class ConductorClient:
 
         if instance_id:
             payload["instance_id"] = instance_id
+            logger.info(f"✅ [ConductorClient] instance_id adicionado ao payload: {instance_id}")
+        else:
+            logger.warning("⚠️ [ConductorClient] instance_id não fornecido, será None no conductor")
 
         if cwd:
             payload["cwd"] = cwd
 
-        logger.info(
-            f"[ConductorClient] Executing agent '{agent_name}' with context_mode='{context_mode}', "
-            f"instance_id='{instance_id}', payload={payload}"
-        )
+        logger.info("=" * 80)
+        logger.info(f"🚀 [ConductorClient] Enviando requisição para Conductor:")
+        logger.info(f"   - agent_name: {agent_name}")
+        logger.info(f"   - instance_id: {instance_id}")
+        logger.info(f"   - context_mode: {context_mode}")
+        logger.info(f"   - prompt: {prompt[:100]}...")
+        logger.info(f"   - Payload completo: {payload}")
+        logger.info("=" * 80)
 
         try:
             url = f"{self.base_url}/conductor/execute"
-            logger.info(f"[ConductorClient] POST {url}")
+            logger.info(f"📤 [ConductorClient] POST {url}")
 
             response = await self.client.post(url, json=payload)
             response.raise_for_status()
             result = response.json()
 
-            logger.info(
-                f"[ConductorClient] Agent '{agent_name}' executed successfully. "
-                f"Response status: {response.status_code}"
-            )
-            logger.debug(f"[ConductorClient] Response: {result}")
+            logger.info("=" * 80)
+            logger.info(f"✅ [ConductorClient] Resposta recebida do Conductor:")
+            logger.info(f"   - Status: {response.status_code}")
+            logger.info(f"   - Agent: {agent_name}")
+            logger.info(f"   - instance_id usado: {instance_id}")
+            logger.info(f"   - Response: {str(result)[:200]}...")
+            logger.info("=" * 80)
+            
             return result
 
         except httpx.HTTPStatusError as e:

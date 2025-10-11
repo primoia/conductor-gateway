@@ -511,8 +511,8 @@ def create_app() -> FastAPI:
                     # Schema completo
                     definition = agent.get('definition', {})
                     agents.append({
-                        "id": str(agent.get("_id", "")),
-                        "agent_id": agent.get("agent_id", ""),
+                        "id": str(agent.get("_id", "")),  # MongoDB ObjectId (for reference)
+                        "agent_id": agent.get("agent_id", ""),  # Agent name/identifier
                         "name": definition.get("name", ""),
                         "emoji": definition.get("emoji", "🤖"),
                         "description": definition.get("description", ""),
@@ -520,11 +520,12 @@ def create_app() -> FastAPI:
                         "tags": definition.get("tags", [])
                     })
                 else:
-                    # Schema simples (fallback)
+                    # Schema simples (fallback) - use 'name' field as agent_id
+                    agent_name = agent.get("name", "")
                     agents.append({
-                        "id": str(agent.get("_id", "")),
-                        "agent_id": agent.get("name", ""),
-                        "name": agent.get("name", ""),
+                        "id": str(agent.get("_id", "")),  # MongoDB ObjectId (for reference)
+                        "agent_id": agent_name,  # Use name as agent_id for consistency
+                        "name": agent_name,
                         "emoji": agent.get("emoji", "🤖"),
                         "description": agent.get("prompt", "")[:100] + "..." if len(agent.get("prompt", "")) > 100 else agent.get("prompt", ""),
                         "model": agent.get("model", "claude"),
@@ -566,13 +567,22 @@ def create_app() -> FastAPI:
             document_id = payload.get("document_id")
             position = payload.get("position")
 
+            logger.info("=" * 80)
+            logger.info(f"📥 [GATEWAY] Requisição recebida em /api/agents/{agent_id}/execute")
+            logger.info(f"   - agent_id: {agent_id}")
+            logger.info(f"   - instance_id: {instance_id}")
+            logger.info(f"   - input_text: {input_text[:100] if input_text else None}...")
+            logger.info(f"   - context_mode: {context_mode}")
+            logger.info(f"   - Payload completo: {payload}")
+            logger.info("=" * 80)
+
             if not input_text:
                 raise HTTPException(status_code=400, detail="input_text is required")
 
-            logger.info(
-                f"[/api/agents/{agent_id}/execute] Executing agent with instance_id: {instance_id}, "
-                f"context_mode: {context_mode}, input: {input_text[:100]}..."
-            )
+            if not instance_id:
+                logger.warning("⚠️ [GATEWAY] instance_id não foi fornecido! O histórico não será isolado por instância.")
+            else:
+                logger.info(f"✅ [GATEWAY] instance_id presente: {instance_id}")
 
             # Get agent from MongoDB to verify it exists
             agents_collection = mongo_db["agents"]
@@ -587,6 +597,11 @@ def create_app() -> FastAPI:
             # Get the actual agent_id for consistent referencing
             actual_agent_id = agent.get("agent_id") or agent.get("name")
 
+            logger.info(f"🚀 [GATEWAY] Chamando conductor_client.execute_agent():")
+            logger.info(f"   - agent_name: {agent.get('name') or agent_id}")
+            logger.info(f"   - instance_id: {instance_id}")
+            logger.info(f"   - context_mode: {context_mode}")
+
             # Execute the agent via Conductor API
             response = await conductor_client.execute_agent(
                 agent_name=agent.get("name") or agent_id,
@@ -596,6 +611,9 @@ def create_app() -> FastAPI:
                 cwd=CONDUCTOR_CONFIG.get("project_path"),
                 timeout=CONDUCTOR_CONFIG.get("timeout", 300),
             )
+
+            logger.info(f"✅ [GATEWAY] Resposta recebida do conductor")
+            logger.info(f"   - Status: success" if response else "   - Status: error")
 
             # Extract result from response
             result_text = response.get("result") or response.get("stdout") or str(response)
@@ -647,18 +665,69 @@ def create_app() -> FastAPI:
             logger.error(f"Error executing agent {agent_id}: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail=str(e))
 
+    @app.post("/api/agents/instances")
+    async def create_agent_instance(payload: dict[str, Any]):
+        """Create a new agent instance record in MongoDB."""
+        if mongo_db is None:
+            raise HTTPException(status_code=503, detail="MongoDB connection not available")
+
+        try:
+            instance_id = payload.get("instance_id")
+            agent_id = payload.get("agent_id")
+            position = payload.get("position")
+            created_at = payload.get("created_at")
+
+            if not instance_id or not agent_id:
+                raise HTTPException(status_code=400, detail="instance_id and agent_id are required")
+
+            logger.info(f"Creating agent instance: {instance_id} for agent: {agent_id}")
+
+            agent_instances = mongo_db["agent_instances"]
+            
+            # Check if instance already exists
+            existing = agent_instances.find_one({"instance_id": instance_id})
+            if existing:
+                logger.info(f"Instance {instance_id} already exists, updating...")
+                agent_instances.update_one(
+                    {"instance_id": instance_id},
+                    {"$set": {
+                        "agent_id": agent_id,
+                        "position": position,
+                        "last_updated": created_at or datetime.now().isoformat()
+                    }}
+                )
+            else:
+                agent_instances.insert_one({
+                    "instance_id": instance_id,
+                    "agent_id": agent_id,
+                    "position": position,
+                    "created_at": created_at or datetime.now().isoformat(),
+                    "last_execution": None
+                })
+
+            return {"status": "success", "instance_id": instance_id}
+
+        except Exception as e:
+            logger.error(f"Error creating agent instance: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail=str(e))
+
     @app.get("/api/agents/context/{instance_id}")
     async def get_agent_context(instance_id: str):
         """Get full context (persona, procedure, history) for a specific agent instance."""
+        logger.info(f"📖 [GATEWAY] get_agent_context chamado para instance_id: {instance_id}")
+        
         if mongo_db is None:
             raise HTTPException(status_code=503, detail="MongoDB connection not available")
 
         try:
             # 1. Get agent_id from agent_instances collection
             agent_instances_collection = mongo_db["agent_instances"]
+            logger.info(f"   - Buscando em agent_instances collection...")
             instance_doc = agent_instances_collection.find_one({"instance_id": instance_id})
+            logger.info(f"   - Documento encontrado: {instance_doc is not None}")
 
             if not instance_doc:
+                logger.error(f"❌ [GATEWAY] Instance '{instance_id}' não encontrado em agent_instances")
                 raise HTTPException(
                     status_code=404,
                     detail=f"Instance '{instance_id}' not found"

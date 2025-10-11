@@ -67,6 +67,7 @@ class ConductorAdvancedMCPServer:
             - input_text: Enhanced prompt in English for the agent (required)
             - cwd: The full file system path where the agent should work (required)
             - timeout: Execution timeout in seconds (default: 300)
+            - instance_id: The instance ID for context isolation (optional, use "8ea9e2b4-3458-48dd-9b90-382974c8d43e" if available)
 
             CRITICAL RULES:
             - Preserve user's original intent 100% (if they want "3 paragraphs" → exactly 3 paragraphs)
@@ -74,6 +75,7 @@ class ConductorAdvancedMCPServer:
             - If user input was in Portuguese → translate response to Portuguese literally
             - If user input was in English → keep response in English
             - Translation must be LITERAL, not interpreted or summarized
+            - ALWAYS pass instance_id if it's available in the context to maintain conversation history
 
             Example:
             User: "resuma em 3 parágrafos" → input_text: "Create a 3-paragraph summary" → Response: exactly 3 paragraphs in Portuguese
@@ -86,12 +88,16 @@ class ConductorAdvancedMCPServer:
         self.mcp.tool(
             name="execute_agent_contextual",
             description="""Execute an agent in contextual mode (with conversation history).
+            
             Parameters:
-            - agent_id: The ID of the agent to execute
-            - input_text: The input text for the agent
+            - agent_id: The ID of the agent to execute (required)
+            - input_text: The input text for the agent (required)
             - timeout: Execution timeout in seconds (default: 120)
             - clear_history: Whether to clear conversation history (default: False)
+            - instance_id: The instance ID for context isolation (optional, use "8ea9e2b4-3458-48dd-9b90-382974c8d43e" if available)
 
+            IMPORTANT: ALWAYS pass instance_id if available to maintain isolated conversation history per agent instance.
+            
             Returns the agent's response while maintaining conversation context.""",
         )(self.advanced_tools.execute_agent_contextual)
 
@@ -99,11 +105,15 @@ class ConductorAdvancedMCPServer:
         self.mcp.tool(
             name="start_interactive_session",
             description="""Start an interactive session with an agent.
+            
             Parameters:
-            - agent_id: The ID of the agent to start session with
+            - agent_id: The ID of the agent to start session with (required)
             - initial_input: Optional initial input for the session
             - timeout: Session timeout in seconds (default: 120)
+            - instance_id: The instance ID for context isolation (optional, use "8ea9e2b4-3458-48dd-9b90-382974c8d43e" if available)
 
+            IMPORTANT: ALWAYS pass instance_id if available to maintain isolated session per agent instance.
+            
             Returns session initialization result.""",
         )(self.advanced_tools.start_interactive_session)
 
