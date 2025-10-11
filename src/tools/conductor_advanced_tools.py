@@ -38,7 +38,11 @@ class ConductorAdvancedTools:
             timeout = self.timeout
 
         url = f"{self.conductor_api_url}{endpoint}"
-        logger.info(f"Chamando Conductor API: {method} {url} com payload: {payload}")
+        logger.info(
+            f"[_call_conductor_api] {method} {url}, "
+            f"instance_id={payload.get('instance_id') if payload else None}"
+        )
+        logger.debug(f"[_call_conductor_api] Full payload: {payload}")
 
         try:
             if method == "GET":
@@ -49,19 +53,24 @@ class ConductorAdvancedTools:
                 raise ValueError(f"Método HTTP não suportado: {method}")
 
             response.raise_for_status() # Lança exceção para status de erro (4xx ou 5xx)
-            return response.json()
+            result = response.json()
+
+            logger.info(f"[_call_conductor_api] Success! Status code: {response.status_code}")
+            logger.debug(f"[_call_conductor_api] Response: {result}")
+
+            return result
 
         except requests.exceptions.Timeout:
             error_msg = f"Conductor API excedeu o tempo limite após {timeout} segundos."
-            logger.error(error_msg)
+            logger.error(f"[_call_conductor_api] {error_msg}")
             return {"status": "error", "stderr": error_msg, "stdout": "", "returncode": 124}
         except requests.exceptions.RequestException as e:
             error_msg = f"Erro ao chamar Conductor API: {e}"
-            logger.error(error_msg, exc_info=True)
+            logger.error(f"[_call_conductor_api] {error_msg}", exc_info=True)
             return {"status": "error", "stderr": error_msg, "stdout": "", "returncode": 1}
         except Exception as e:
             error_msg = f"Erro inesperado: {e}"
-            logger.error(error_msg, exc_info=True)
+            logger.error(f"[_call_conductor_api] {error_msg}", exc_info=True)
             return {"status": "error", "stderr": error_msg, "stdout": "", "returncode": 1}
 
     def _format_response(self, result: dict) -> str:
@@ -98,10 +107,17 @@ class ConductorAdvancedTools:
         result = self._call_conductor_api(endpoint=endpoint, method="POST", payload=payload)
         return self._format_response(result)
 
-    def execute_agent_stateless(self, agent_id: str, input_text: str, cwd: str, timeout: int = 300) -> dict:
+    def execute_agent_stateless(self, agent_id: str, input_text: str, cwd: str, timeout: int = 300, instance_id: str = None) -> dict:
         """
         Executa um agente usando o endpoint genérico do Conductor CLI.
         Preserva o input original do usuário.
+
+        Args:
+            agent_id: ID do agente
+            input_text: Texto de entrada
+            cwd: Diretório de trabalho
+            timeout: Timeout em segundos
+            instance_id: ID da instância para contexto (opcional)
         """
         if not agent_id or not input_text or not cwd:
             return {"status": "error", "stderr": "agent_id, input_text e cwd são obrigatórios"}
@@ -115,6 +131,15 @@ class ConductorAdvancedTools:
             "chat": False  # Modo stateless
         }
 
+        if instance_id:
+            payload["instance_id"] = instance_id
+
+        logger.info(
+            f"[ConductorAdvancedTools] execute_agent_stateless: agent_id={agent_id}, "
+            f"instance_id={instance_id}, timeout={timeout}"
+        )
+        logger.debug(f"[ConductorAdvancedTools] Payload: {payload}")
+
         # O timeout da chamada de rede deve ser maior que o timeout da tarefa
         network_timeout = timeout + 20
 
@@ -124,6 +149,8 @@ class ConductorAdvancedTools:
             payload=payload,
             timeout=network_timeout
         )
+
+        logger.info(f"[ConductorAdvancedTools] execute_agent_stateless result status: {result.get('status')}")
         return result
 
     def get_agent_info(self, agent_id: str) -> str:
@@ -140,8 +167,17 @@ class ConductorAdvancedTools:
         result = self._call_conductor_api(endpoint=endpoint, method="POST", payload=payload)
         return self._format_response(result)
 
-    def execute_agent_contextual(self, agent_id: str, input_text: str, timeout: int = 120, clear_history: bool = False) -> dict:
-        """Executa um agente mantendo contexto de conversação usando API genérica."""
+    def execute_agent_contextual(self, agent_id: str, input_text: str, timeout: int = 120, clear_history: bool = False, instance_id: str = None) -> dict:
+        """
+        Executa um agente mantendo contexto de conversação usando API genérica.
+
+        Args:
+            agent_id: ID do agente
+            input_text: Texto de entrada
+            timeout: Timeout em segundos
+            clear_history: Se deve limpar histórico antes de executar
+            instance_id: ID da instância para contexto (opcional)
+        """
         endpoint = "/conductor/execute"
         payload = {
             "agent_id": agent_id,
@@ -150,11 +186,31 @@ class ConductorAdvancedTools:
             "chat": True,  # Modo contextual
             "clear_history": clear_history
         }
+
+        if instance_id:
+            payload["instance_id"] = instance_id
+
+        logger.info(
+            f"[ConductorAdvancedTools] execute_agent_contextual: agent_id={agent_id}, "
+            f"instance_id={instance_id}, clear_history={clear_history}, timeout={timeout}"
+        )
+        logger.debug(f"[ConductorAdvancedTools] Payload: {payload}")
+
         result = self._call_conductor_api(endpoint=endpoint, method="POST", payload=payload, timeout=timeout + 20)
+
+        logger.info(f"[ConductorAdvancedTools] execute_agent_contextual result status: {result.get('status')}")
         return result
 
-    def start_interactive_session(self, agent_id: str, initial_input: str = None, timeout: int = 120) -> dict:
-        """Inicia uma sessão interativa com um agente usando API genérica."""
+    def start_interactive_session(self, agent_id: str, initial_input: str = None, timeout: int = 120, instance_id: str = None) -> dict:
+        """
+        Inicia uma sessão interativa com um agente usando API genérica.
+
+        Args:
+            agent_id: ID do agente
+            initial_input: Input inicial (opcional)
+            timeout: Timeout em segundos
+            instance_id: ID da instância para contexto (opcional)
+        """
         endpoint = "/conductor/execute"
         payload = {
             "agent_id": agent_id,
@@ -163,7 +219,19 @@ class ConductorAdvancedTools:
             "chat": True,
             "interactive": True
         }
+
+        if instance_id:
+            payload["instance_id"] = instance_id
+
+        logger.info(
+            f"[ConductorAdvancedTools] start_interactive_session: agent_id={agent_id}, "
+            f"instance_id={instance_id}, timeout={timeout}"
+        )
+        logger.debug(f"[ConductorAdvancedTools] Payload: {payload}")
+
         result = self._call_conductor_api(endpoint=endpoint, method="POST", payload=payload)
+
+        logger.info(f"[ConductorAdvancedTools] start_interactive_session result status: {result.get('status')}")
         return result
 
     def install_agent_templates(self, template_name: str = None) -> str:

@@ -36,6 +36,20 @@ mongo_db = None
 conductor_client: ConductorClient | None = None
 
 
+def mongo_to_dict(item: dict) -> dict:
+    """Convert MongoDB document to JSON-serializable dict."""
+    # Convert _id if it's an ObjectId (for some collections)
+    if "_id" in item and hasattr(item["_id"], "__str__"):
+        item["_id"] = str(item["_id"])
+
+    # Convert datetime objects to ISO format strings
+    for key, value in item.items():
+        if hasattr(value, "isoformat"):  # datetime, date, or time object
+            item[key] = value.isoformat()
+
+    return item
+
+
 def start_mcp_server():
     """Starts MCP server in a separate thread."""
     try:
@@ -188,6 +202,11 @@ async def lifespan(app: FastAPI):
         agent_instances = mongo_db["agent_instances"]
         agent_instances.create_index("instance_id", unique=True)
         logger.info("Created index on agent_instances.instance_id")
+
+        # Ensure compound index on history collection for performance
+        history_collection = mongo_db["history"]
+        history_collection.create_index([("instance_id", 1), ("timestamp", 1)])
+        logger.info("Ensured compound index on history collection [instance_id, timestamp]")
     except Exception as e:
         logger.error(f"Failed to connect to MongoDB: {e}")
         mongo_client = None
@@ -382,23 +401,37 @@ def create_app() -> FastAPI:
             conductor_api_url = CONDUCTOR_CONFIG.get("conductor_api_url", "http://conductor-api:8000")
             url = f"{conductor_api_url}/conductor/execute"
 
-            logger.info(f"Proxying to {url}, payload: {str(payload)[:150]}...")
+            logger.info(
+                f"[Proxy /conductor/execute] Proxying to {url}, "
+                f"agent_id={payload.get('agent_id')}, instance_id={payload.get('instance_id')}"
+            )
+            logger.debug(f"[Proxy /conductor/execute] Full payload: {payload}")
 
             # Forward request to internal conductor-api with custom timeout
             timeout_value = payload.get("timeout", 300)
             async with httpx.AsyncClient(timeout=httpx.Timeout(timeout_value + 10)) as client:
                 response = await client.post(url, json=payload)
                 response.raise_for_status()
-                return response.json()
+                result = response.json()
+
+                logger.info(
+                    f"[Proxy /conductor/execute] Success! Status code: {response.status_code}"
+                )
+                logger.debug(f"[Proxy /conductor/execute] Response: {result}")
+
+                return result
 
         except httpx.HTTPStatusError as e:
-            logger.error(f"HTTP error from conductor-api: {e}")
+            logger.error(
+                f"[Proxy /conductor/execute] HTTP error from conductor-api: "
+                f"{e.response.status_code} - {e.response.text}"
+            )
             raise HTTPException(status_code=e.response.status_code, detail=e.response.text)
         except httpx.RequestError as e:
-            logger.error(f"Request error to conductor-api: {e}")
+            logger.error(f"[Proxy /conductor/execute] Request error to conductor-api: {e}")
             raise HTTPException(status_code=503, detail=f"Conductor API unavailable: {str(e)}")
         except Exception as e:
-            logger.error(f"Error proxying to conductor-api: {e}", exc_info=True)
+            logger.error(f"[Proxy /conductor/execute] Error proxying to conductor-api: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail=str(e))
 
     @app.post("/execute-agent")
@@ -412,6 +445,7 @@ def create_app() -> FastAPI:
             input_text = payload.get("input_text")
             cwd = payload.get("cwd")
             timeout = payload.get("timeout", 300)
+            instance_id = payload.get("instance_id")
 
             if not agent_id or not input_text or not cwd:
                 raise HTTPException(
@@ -419,7 +453,10 @@ def create_app() -> FastAPI:
                     detail="agent_id, input_text e cwd são obrigatórios"
                 )
 
-            logger.info(f"Executing agent {agent_id} with input: {input_text[:100]}...")
+            logger.info(
+                f"[/execute-agent] Executing agent {agent_id} with instance_id={instance_id}, "
+                f"input: {input_text[:100]}..."
+            )
 
             # Initialize conductor tools and execute
             conductor_tools = ConductorAdvancedTools()
@@ -427,13 +464,16 @@ def create_app() -> FastAPI:
                 agent_id=agent_id,
                 input_text=input_text,
                 cwd=cwd,
-                timeout=timeout
+                timeout=timeout,
+                instance_id=instance_id
             )
+
+            logger.info(f"[/execute-agent] Agent {agent_id} execution completed with status: {result.get('status')}")
 
             return result
 
         except Exception as e:
-            logger.error(f"Error executing agent: {e}", exc_info=True)
+            logger.error(f"[/execute-agent] Error executing agent: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail=str(e))
 
     @app.get("/health")
@@ -530,20 +570,26 @@ def create_app() -> FastAPI:
                 raise HTTPException(status_code=400, detail="input_text is required")
 
             logger.info(
-                f"Executing agent {agent_id} with instance_id: {instance_id}, "
-                f"context_mode: {context_mode}"
+                f"[/api/agents/{agent_id}/execute] Executing agent with instance_id: {instance_id}, "
+                f"context_mode: {context_mode}, input: {input_text[:100]}..."
             )
 
             # Get agent from MongoDB to verify it exists
             agents_collection = mongo_db["agents"]
-            agent = agents_collection.find_one({"name": agent_id})
+            # Try to find by agent_id first, then fallback to name for compatibility
+            agent = agents_collection.find_one({"agent_id": agent_id})
+            if not agent:
+                agent = agents_collection.find_one({"name": agent_id})
 
             if not agent:
                 raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found")
 
+            # Get the actual agent_id for consistent referencing
+            actual_agent_id = agent.get("agent_id") or agent.get("name")
+
             # Execute the agent via Conductor API
             response = await conductor_client.execute_agent(
-                agent_name=agent["name"],
+                agent_name=agent.get("name") or agent_id,
                 prompt=input_text,
                 instance_id=instance_id,
                 context_mode=context_mode,
@@ -551,11 +597,14 @@ def create_app() -> FastAPI:
                 timeout=CONDUCTOR_CONFIG.get("timeout", 300),
             )
 
+            # Extract result from response
+            result_text = response.get("result") or response.get("stdout") or str(response)
+
             # Save/update metadata for instance (if instance_id provided)
             if instance_id:
                 agent_instances = mongo_db["agent_instances"]
                 update_data = {
-                    "agent_id": agent_id,
+                    "agent_id": actual_agent_id,
                     "last_execution": datetime.now().isoformat(),
                 }
 
@@ -576,6 +625,9 @@ def create_app() -> FastAPI:
 
                 logger.info(f"Updated metadata for instance {instance_id}")
 
+                # Note: Conversation history is now saved by conductor-api in agent_conversations collection
+                # This avoids duplication and keeps history management centralized
+
             return {
                 "status": "success",
                 "result": response,
@@ -593,6 +645,80 @@ def create_app() -> FastAPI:
             )
         except Exception as e:
             logger.error(f"Error executing agent {agent_id}: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.get("/api/agents/context/{instance_id}")
+    async def get_agent_context(instance_id: str):
+        """Get full context (persona, procedure, history) for a specific agent instance."""
+        if mongo_db is None:
+            raise HTTPException(status_code=503, detail="MongoDB connection not available")
+
+        try:
+            # 1. Get agent_id from agent_instances collection
+            agent_instances_collection = mongo_db["agent_instances"]
+            instance_doc = agent_instances_collection.find_one({"instance_id": instance_id})
+
+            if not instance_doc:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Instance '{instance_id}' not found"
+                )
+
+            agent_id = instance_doc.get("agent_id")
+            if not agent_id:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Instance '{instance_id}' has no associated agent_id"
+                )
+
+            # 2. Get persona and definition from agents collection
+            agents_collection = mongo_db["agents"]
+            agent_doc = agents_collection.find_one({"agent_id": agent_id})
+
+            persona = ""
+            operating_procedure = ""
+
+            if agent_doc:
+                # Extract persona.content (it's an object with 'content' field)
+                persona_obj = agent_doc.get("persona", {})
+                if isinstance(persona_obj, dict):
+                    persona = persona_obj.get("content", "")
+                else:
+                    persona = str(persona_obj)
+
+                # Extract definition (use as operating_procedure)
+                definition = agent_doc.get("definition")
+                if definition:
+                    # Convert definition object to string if needed
+                    if isinstance(definition, dict):
+                        import json
+                        operating_procedure = json.dumps(definition, indent=2)
+                    else:
+                        operating_procedure = str(definition)
+            else:
+                logger.warning(f"Agent '{agent_id}' not found in agents collection")
+
+            # 3. Fetch history for the instance
+            history_collection = mongo_db["history"]
+            history_cursor = history_collection.find({"instance_id": instance_id}).sort("timestamp", 1)
+            history = [mongo_to_dict(dict(item)) for item in history_cursor]
+
+            logger.info(
+                f"Retrieved context for instance {instance_id}: "
+                f"agent_id={agent_id}, history_count={len(history)}"
+            )
+
+            # 4. Build and return complete JSON
+            return {
+                "persona": persona,
+                "operating_procedure": operating_procedure,
+                "history": history
+            }
+
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Error retrieving context for instance {instance_id}: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail=str(e))
 
     return app

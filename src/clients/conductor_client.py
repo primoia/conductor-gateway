@@ -68,18 +68,23 @@ class ConductorClient:
             payload["cwd"] = cwd
 
         logger.info(
-            f"Executing agent '{agent_name}' with context_mode='{context_mode}', "
-            f"instance_id='{instance_id}'"
+            f"[ConductorClient] Executing agent '{agent_name}' with context_mode='{context_mode}', "
+            f"instance_id='{instance_id}', payload={payload}"
         )
 
         try:
-            response = await self.client.post(
-                f"{self.base_url}/conductor/execute", json=payload
-            )
+            url = f"{self.base_url}/conductor/execute"
+            logger.info(f"[ConductorClient] POST {url}")
+
+            response = await self.client.post(url, json=payload)
             response.raise_for_status()
             result = response.json()
 
-            logger.info(f"Agent '{agent_name}' executed successfully")
+            logger.info(
+                f"[ConductorClient] Agent '{agent_name}' executed successfully. "
+                f"Response status: {response.status_code}"
+            )
+            logger.debug(f"[ConductorClient] Response: {result}")
             return result
 
         except httpx.HTTPStatusError as e:

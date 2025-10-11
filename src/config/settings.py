@@ -24,7 +24,7 @@ def load_config():
         },
         "mongodb": {
             "url": os.getenv("MONGODB_URL", "mongodb://admin:czrimr@mongodb:27017/?authSource=admin"),
-            "database": "conductor",
+            "database": "conductor_state",
         },
     }
 
