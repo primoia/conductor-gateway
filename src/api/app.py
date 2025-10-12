@@ -19,6 +19,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pymongo import MongoClient
 
+from src.api.routers.screenplays import init_screenplay_service, router as screenplays_router
 from src.clients.conductor_client import ConductorClient
 from src.config.settings import CONDUCTOR_CONFIG, MONGODB_CONFIG, SERVER_CONFIG
 from src.utils.mcp_utils import init_agent
@@ -207,6 +208,10 @@ async def lifespan(app: FastAPI):
         history_collection = mongo_db["history"]
         history_collection.create_index([("instance_id", 1), ("timestamp", 1)])
         logger.info("Ensured compound index on history collection [instance_id, timestamp]")
+
+        # Initialize screenplay service
+        init_screenplay_service(mongo_db)
+        logger.info("Initialized ScreenplayService with MongoDB connection")
     except Exception as e:
         logger.error(f"Failed to connect to MongoDB: {e}")
         mongo_client = None
@@ -261,6 +266,9 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    # Include routers
+    app.include_router(screenplays_router)
 
     # SSE Streaming Endpoints - Following Plan2 Hybrid REST + EventSource pattern
 
@@ -673,48 +681,438 @@ def create_app() -> FastAPI:
 
     @app.post("/api/agents/instances")
     async def create_agent_instance(payload: dict[str, Any]):
-        """Create a new agent instance record in MongoDB."""
+        """
+        Create a new agent instance record in MongoDB.
+
+        Required fields:
+        - instance_id: Unique identifier (format: instance-{timestamp}-{random})
+        - agent_id: Agent identifier (foreign key to agents collection)
+        - position: {"x": float, "y": float}
+
+        Optional fields:
+        - cwd: Current working directory
+        - status: Initial status (default: "pending")
+        - config: Configuration object
+        - emoji: Agent emoji
+        - definition: Agent definition object
+        """
         if mongo_db is None:
             raise HTTPException(status_code=503, detail="MongoDB connection not available")
 
         try:
+            # Validate required fields
+            required_fields = ["instance_id", "agent_id", "position"]
+            missing_fields = [field for field in required_fields if field not in payload]
+
+            if missing_fields:
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "success": False,
+                        "error": f"Missing required fields: {', '.join(missing_fields)}",
+                        "required_fields": required_fields
+                    }
+                )
+
             instance_id = payload.get("instance_id")
             agent_id = payload.get("agent_id")
             position = payload.get("position")
-            created_at = payload.get("created_at")
 
-            if not instance_id or not agent_id:
-                raise HTTPException(status_code=400, detail="instance_id and agent_id are required")
+            # Validate position format
+            if not isinstance(position, dict) or "x" not in position or "y" not in position:
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "success": False,
+                        "error": "Invalid position format. Expected: {x: number, y: number}"
+                    }
+                )
 
             logger.info(f"Creating agent instance: {instance_id} for agent: {agent_id}")
 
             agent_instances = mongo_db["agent_instances"]
-            
-            # Check if instance already exists
+
+            # Check if instance already exists (prevent duplicates)
             existing = agent_instances.find_one({"instance_id": instance_id})
             if existing:
-                logger.info(f"Instance {instance_id} already exists, updating...")
-                agent_instances.update_one(
-                    {"instance_id": instance_id},
-                    {"$set": {
-                        "agent_id": agent_id,
-                        "position": position,
-                        "last_updated": created_at or datetime.now().isoformat()
-                    }}
+                logger.warning(f"Instance {instance_id} already exists")
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "success": False,
+                        "error": "Instance already exists",
+                        "instance_id": instance_id,
+                        "hint": "Use PATCH /api/agents/instances/{id} to update existing instance"
+                    }
                 )
-            else:
-                agent_instances.insert_one({
-                    "instance_id": instance_id,
-                    "agent_id": agent_id,
-                    "position": position,
-                    "created_at": created_at or datetime.now().isoformat(),
-                    "last_execution": None
-                })
 
-            return {"status": "success", "instance_id": instance_id}
+            # Build document with automatic timestamps
+            now = datetime.now().isoformat()
+            insert_doc = {
+                "instance_id": instance_id,
+                "agent_id": agent_id,
+                "position": position,
+                "status": payload.get("status", "pending"),  # Default to "pending"
+                "created_at": now,
+                "updated_at": now,
+                "last_execution": None
+            }
 
+            # Add optional fields if provided
+            if "cwd" in payload:
+                insert_doc["cwd"] = payload["cwd"]
+            if "config" in payload:
+                insert_doc["config"] = payload["config"]
+            if "emoji" in payload:
+                insert_doc["emoji"] = payload["emoji"]
+            if "definition" in payload:
+                insert_doc["definition"] = payload["definition"]
+
+            # Insert into MongoDB
+            result = agent_instances.insert_one(insert_doc)
+            logger.info(f"Successfully created instance {instance_id} with _id: {result.inserted_id}")
+
+            # Fetch and return the created document
+            created_doc = agent_instances.find_one({"_id": result.inserted_id})
+            created_doc = mongo_to_dict(created_doc)
+
+            return {
+                "success": True,
+                "message": "Instance created successfully",
+                "instance": created_doc
+            }
+
+        except HTTPException:
+            raise
         except Exception as e:
             logger.error(f"Error creating agent instance: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.patch("/api/agents/instances/{instance_id}/cwd")
+    async def update_instance_cwd(instance_id: str, payload: dict[str, Any]):
+        """Update the current working directory (cwd) for a specific agent instance."""
+        if mongo_db is None:
+            raise HTTPException(status_code=503, detail="MongoDB connection not available")
+
+        try:
+            cwd = payload.get("cwd")
+
+            # Validation
+            if not cwd or not isinstance(cwd, str):
+                raise HTTPException(status_code=400, detail="Invalid cwd path")
+
+            logger.info(f"Updating cwd for instance {instance_id} to: {cwd}")
+
+            agent_instances = mongo_db["agent_instances"]
+
+            # Update MongoDB
+            result = agent_instances.update_one(
+                {"instance_id": instance_id},
+                {
+                    "$set": {
+                        "cwd": cwd,
+                        "updated_at": datetime.now().isoformat()
+                    }
+                }
+            )
+
+            # Check if instance was found
+            if result.matched_count == 0:
+                logger.warning(f"Instance {instance_id} not found")
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Instance not found"
+                )
+
+            logger.info(f"Successfully updated cwd for instance {instance_id}")
+
+            return {
+                "success": True,
+                "message": "CWD updated successfully",
+                "instance_id": instance_id,
+                "cwd": cwd
+            }
+
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Error updating instance cwd: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.get("/api/agents/instances")
+    async def list_agent_instances(
+        agent_id: str = None,
+        status: str = None,
+        limit: int = 100,
+        offset: int = 0,
+        sort: str = "-created_at"
+    ):
+        """
+        List all agent instances with optional filtering.
+
+        Query parameters:
+        - agent_id: Filter by agent_id
+        - status: Filter by status (pending|queued|running|completed|error)
+        - limit: Maximum number of results (default: 100, max: 500)
+        - offset: Pagination offset (default: 0)
+        - sort: Sort field, prefix with '-' for descending (default: -created_at)
+        """
+        if mongo_db is None:
+            raise HTTPException(status_code=503, detail="MongoDB connection not available")
+
+        try:
+            # Build query filter
+            query_filter = {}
+            if agent_id:
+                query_filter["agent_id"] = agent_id
+            if status:
+                query_filter["status"] = status
+
+            # Validate and apply limits
+            limit = max(1, min(limit, 500))  # Between 1 and 500
+            offset = max(0, offset)
+
+            # Parse sort field
+            sort_field = sort.lstrip("-")
+            sort_direction = -1 if sort.startswith("-") else 1
+
+            logger.info(f"Listing agent instances with filter: {query_filter}, limit: {limit}, offset: {offset}")
+
+            # Query MongoDB
+            agent_instances = mongo_db["agent_instances"]
+            cursor = agent_instances.find(query_filter)
+            cursor = cursor.sort(sort_field, sort_direction).skip(offset).limit(limit)
+
+            instances = []
+            for doc in cursor:
+                # Convert MongoDB document to JSON-serializable dict
+                doc = mongo_to_dict(doc)
+                instances.append(doc)
+
+            logger.info(f"Retrieved {len(instances)} agent instances")
+
+            return {
+                "success": True,
+                "count": len(instances),
+                "instances": instances
+            }
+
+        except Exception as e:
+            logger.error(f"Error listing agent instances: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.get("/api/agents/instances/{instance_id}")
+    async def get_agent_instance(instance_id: str):
+        """Get a specific agent instance by ID."""
+        if mongo_db is None:
+            raise HTTPException(status_code=503, detail="MongoDB connection not available")
+
+        try:
+            logger.info(f"Fetching agent instance: {instance_id}")
+
+            agent_instances = mongo_db["agent_instances"]
+            doc = agent_instances.find_one({"instance_id": instance_id})
+
+            if not doc:
+                logger.warning(f"Instance {instance_id} not found")
+                raise HTTPException(
+                    status_code=404,
+                    detail={
+                        "success": False,
+                        "error": "Instance not found",
+                        "instance_id": instance_id
+                    }
+                )
+
+            # Convert to JSON-serializable dict
+            doc = mongo_to_dict(doc)
+
+            logger.info(f"Retrieved instance {instance_id}")
+
+            return {
+                "success": True,
+                "instance": doc
+            }
+
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Error getting instance {instance_id}: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.patch("/api/agents/instances/{instance_id}")
+    async def update_agent_instance(instance_id: str, payload: dict[str, Any]):
+        """
+        Update an agent instance (position, status, config, execution_state).
+
+        Updatable fields:
+        - position: {"x": float, "y": float}
+        - status: "pending"|"queued"|"running"|"completed"|"error"
+        - config: {"cwd": string, ...}
+        - execution_state: {"start_time": ISO8601, "end_time": ISO8601, "error_message": string, "output": string}
+        """
+        if mongo_db is None:
+            raise HTTPException(status_code=503, detail="MongoDB connection not available")
+
+        try:
+            # Check if instance exists
+            agent_instances = mongo_db["agent_instances"]
+            existing = agent_instances.find_one({"instance_id": instance_id})
+
+            if not existing:
+                logger.warning(f"Instance {instance_id} not found for update")
+                raise HTTPException(
+                    status_code=404,
+                    detail={
+                        "success": False,
+                        "error": "Instance not found",
+                        "instance_id": instance_id
+                    }
+                )
+
+            # Build update document
+            update_doc = {"$set": {"updated_at": datetime.now().isoformat()}}
+            updated_fields = []
+
+            # Update position
+            if "position" in payload:
+                position = payload["position"]
+                if not isinstance(position, dict) or "x" not in position or "y" not in position:
+                    raise HTTPException(
+                        status_code=400,
+                        detail={"success": False, "error": "Invalid position format. Expected: {x: number, y: number}"}
+                    )
+                update_doc["$set"]["position"] = position
+                updated_fields.append("position")
+
+            # Update status
+            if "status" in payload:
+                status = payload["status"]
+                valid_statuses = ["pending", "queued", "running", "completed", "error"]
+                if status not in valid_statuses:
+                    raise HTTPException(
+                        status_code=400,
+                        detail={
+                            "success": False,
+                            "error": f"Invalid status. Allowed values: {valid_statuses}"
+                        }
+                    )
+                update_doc["$set"]["status"] = status
+                updated_fields.append("status")
+
+            # Update config (merge with existing)
+            if "config" in payload:
+                config_update = payload["config"]
+                if not isinstance(config_update, dict):
+                    raise HTTPException(
+                        status_code=400,
+                        detail={"success": False, "error": "Config must be an object"}
+                    )
+                for key, value in config_update.items():
+                    update_doc["$set"][f"config.{key}"] = value
+                updated_fields.append("config")
+
+            # Update execution_state (merge with existing)
+            if "execution_state" in payload:
+                exec_update = payload["execution_state"]
+                if not isinstance(exec_update, dict):
+                    raise HTTPException(
+                        status_code=400,
+                        detail={"success": False, "error": "execution_state must be an object"}
+                    )
+                for key, value in exec_update.items():
+                    update_doc["$set"][f"execution_state.{key}"] = value
+                updated_fields.append("execution_state")
+
+            # Perform update
+            logger.info(f"Updating instance {instance_id} with fields: {updated_fields}")
+
+            result = agent_instances.update_one(
+                {"instance_id": instance_id},
+                update_doc
+            )
+
+            return {
+                "success": True,
+                "message": "Instance updated successfully",
+                "instance_id": instance_id,
+                "updated_fields": updated_fields,
+                "updated_at": update_doc["$set"]["updated_at"]
+            }
+
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Error updating instance {instance_id}: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.delete("/api/agents/instances/{instance_id}")
+    async def delete_agent_instance(instance_id: str, cascade: bool = False):
+        """
+        Delete an agent instance and optionally its related data.
+
+        Query parameters:
+        - cascade: If true, also delete related history and logs (default: false)
+        """
+        if mongo_db is None:
+            raise HTTPException(status_code=503, detail="MongoDB connection not available")
+
+        try:
+            # Check if instance exists
+            agent_instances = mongo_db["agent_instances"]
+            existing = agent_instances.find_one({"instance_id": instance_id})
+
+            if not existing:
+                logger.warning(f"Instance {instance_id} not found for deletion")
+                raise HTTPException(
+                    status_code=404,
+                    detail={
+                        "success": False,
+                        "error": "Instance not found",
+                        "instance_id": instance_id
+                    }
+                )
+
+            cascade_deleted = {}
+
+            # Delete related data if cascade=true
+            if cascade:
+                logger.info(f"Cascade deleting related data for instance {instance_id}")
+
+                # Delete from history collection
+                history_collection = mongo_db["history"]
+                history_result = history_collection.delete_many({"instance_id": instance_id})
+                cascade_deleted["history_records"] = history_result.deleted_count
+
+                # Delete from agent_chat_history collection (if exists)
+                if "agent_chat_history" in mongo_db.list_collection_names():
+                    chat_history_collection = mongo_db["agent_chat_history"]
+                    chat_result = chat_history_collection.delete_many({"instance_id": instance_id})
+                    cascade_deleted["chat_history_records"] = chat_result.deleted_count
+
+                # Delete from agent_conversations collection (if exists)
+                if "agent_conversations" in mongo_db.list_collection_names():
+                    conversations_collection = mongo_db["agent_conversations"]
+                    conv_result = conversations_collection.delete_many({"instance_id": instance_id})
+                    cascade_deleted["conversation_records"] = conv_result.deleted_count
+
+            # Delete the instance itself
+            logger.info(f"Deleting instance {instance_id}")
+            result = agent_instances.delete_one({"instance_id": instance_id})
+
+            logger.info(f"Successfully deleted instance {instance_id}, cascade_deleted: {cascade_deleted}")
+
+            return {
+                "success": True,
+                "message": "Instance deleted successfully",
+                "instance_id": instance_id,
+                "cascade_deleted": cascade_deleted if cascade else None
+            }
+
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Error deleting instance {instance_id}: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail=str(e))
 
     @app.get("/api/agents/context/{instance_id}")
@@ -778,16 +1176,20 @@ def create_app() -> FastAPI:
             history_cursor = history_collection.find({"instance_id": instance_id}).sort("timestamp", 1)
             history = [mongo_to_dict(dict(item)) for item in history_cursor]
 
+            # 4. Get cwd from instance document
+            cwd = instance_doc.get("cwd")
+
             logger.info(
                 f"Retrieved context for instance {instance_id}: "
-                f"agent_id={agent_id}, history_count={len(history)}"
+                f"agent_id={agent_id}, history_count={len(history)}, cwd={cwd}"
             )
 
-            # 4. Build and return complete JSON
+            # 5. Build and return complete JSON
             return {
                 "persona": persona,
                 "operating_procedure": operating_procedure,
-                "history": history
+                "history": history,
+                "cwd": cwd
             }
 
         except HTTPException:
