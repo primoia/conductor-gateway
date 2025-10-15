@@ -557,7 +557,8 @@ def create_app() -> FastAPI:
             "input_text": "Text to process",
             "instance_id": "uuid-optional",
             "context_mode": "stateful|stateless",
-            "document_id": "optional-document-id",
+            "screenplay_id": "optional-screenplay-id",
+            "document_id": "optional-document-id (deprecated, use screenplay_id)",
             "position": {"x": 100, "y": 200}
         }
         """
@@ -575,6 +576,9 @@ def create_app() -> FastAPI:
             document_id = payload.get("document_id")
             position = payload.get("position")
             cwd = payload.get("cwd")  # Extract cwd from payload
+            
+            # Extract screenplay_id (support both screenplay_id and document_id for backward compatibility)
+            screenplay_id = payload.get("screenplay_id") or payload.get("document_id")
 
             logger.info("=" * 80)
             logger.info(f"📥 [GATEWAY] Requisição recebida em /api/agents/{agent_id}/execute")
@@ -641,8 +645,8 @@ def create_app() -> FastAPI:
                 }
 
                 # Add optional fields if provided
-                if document_id:
-                    update_data["document_id"] = document_id
+                if screenplay_id:
+                    update_data["screenplay_id"] = screenplay_id
                 if position:
                     update_data["position"] = position
 
@@ -690,6 +694,7 @@ def create_app() -> FastAPI:
         - position: {"x": float, "y": float}
 
         Optional fields:
+        - screenplay_id: Screenplay identifier for context association
         - cwd: Current working directory
         - status: Initial status (default: "pending")
         - config: Configuration object
@@ -729,6 +734,10 @@ def create_app() -> FastAPI:
                 )
 
             logger.info(f"Creating agent instance: {instance_id} for agent: {agent_id}")
+            logger.info(f"🔍 [DEBUG] Payload recebido no gateway:")
+            logger.info(f"   - payload completo: {payload}")
+            logger.info(f"   - screenplay_id no payload: {payload.get('screenplay_id')}")
+            logger.info(f"   - screenplay_id tipo: {type(payload.get('screenplay_id'))}")
 
             agent_instances = mongo_db["agent_instances"]
 
@@ -758,6 +767,17 @@ def create_app() -> FastAPI:
                 "last_execution": None
             }
 
+            # Add screenplay_id if provided
+            screenplay_id = payload.get("screenplay_id")
+            logger.info(f"🔍 [DEBUG] Processando screenplay_id:")
+            logger.info(f"   - screenplay_id extraído: {screenplay_id}")
+            logger.info(f"   - screenplay_id é truthy: {bool(screenplay_id)}")
+            if screenplay_id:
+                insert_doc["screenplay_id"] = screenplay_id
+                logger.info(f"   - ✅ screenplay_id adicionado ao insert_doc: {screenplay_id}")
+            else:
+                logger.warning(f"   - ❌ screenplay_id não foi adicionado (valor: {screenplay_id})")
+
             # Add optional fields if provided
             if "cwd" in payload:
                 insert_doc["cwd"] = payload["cwd"]
@@ -769,6 +789,12 @@ def create_app() -> FastAPI:
                 insert_doc["definition"] = payload["definition"]
 
             # Insert into MongoDB
+            logger.info(f"🔍 [DEBUG] Documento final a ser inserido no MongoDB:")
+            logger.info(f"   - insert_doc completo: {insert_doc}")
+            logger.info(f"   - insert_doc contém screenplay_id: {'screenplay_id' in insert_doc}")
+            if 'screenplay_id' in insert_doc:
+                logger.info(f"   - insert_doc.screenplay_id: {insert_doc['screenplay_id']}")
+            
             result = agent_instances.insert_one(insert_doc)
             logger.info(f"Successfully created instance {instance_id} with _id: {result.inserted_id}")
 
