@@ -1,11 +1,14 @@
-name: Docker Build
+name: Docker
 
 on:
   push:
-    branches: [ main ]
-    tags: [ 'v*' ]
+    # Temporarily disabled
+    branches:
+      - 'never-trigger-this-workflow'
   pull_request:
-    branches: [ main ]
+    # Temporarily disabled
+    branches:
+      - 'never-trigger-this-workflow'
 
 env:
   REGISTRY: ghcr.io

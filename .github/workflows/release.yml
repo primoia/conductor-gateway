@@ -1,9 +1,14 @@
 name: Release
 
 on:
+  release:
+    types: [published]
+  workflow_dispatch:
   push:
-    tags:
-      - 'v*.*.*'
+    # Temporarily disabled
+    branches:
+      - 'never-trigger-this-workflow'
+
 
 jobs:
   release:

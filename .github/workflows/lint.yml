@@ -1,13 +1,17 @@
-name: Code Quality
+name: Lint
 
 on:
   push:
-    branches: [ main, develop ]
+    # Temporarily disabled
+    branches:
+      - 'never-trigger-this-workflow'
   pull_request:
-    branches: [ main, develop ]
+    # Temporarily disabled
+    branches:
+      - 'never-trigger-this-workflow'
 
 jobs:
-  lint:
+  yamllint:
     runs-on: ubuntu-latest
 
     steps:

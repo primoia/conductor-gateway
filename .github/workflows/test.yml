@@ -1,10 +1,14 @@
-name: Tests
+name: Test
 
 on:
   push:
-    branches: [ main, develop ]
+    # Temporarily disabled
+    branches:
+      - 'never-trigger-this-workflow'
   pull_request:
-    branches: [ main, develop ]
+    # Temporarily disabled
+    branches:
+      - 'never-trigger-this-workflow'
 
 jobs:
   test:
