@@ -22,14 +22,9 @@ COPY src/ ./src/
 ENV PATH="/app/.venv/bin:$PATH"
 ENV PYTHONPATH="/app"
 
-# Create non-root user for security
-RUN groupadd -r appuser && useradd -r -g appuser appuser
-RUN chown -R appuser:appuser /app
-USER appuser
-
 # Expose both FastAPI and MCP ports
-EXPOSE 5006
+EXPOSE 8080
 EXPOSE 8006
 
-# Command to start the server
-CMD ["/app/.venv/bin/python", "src/main.py"]
+# Command to start the server - use uvicorn with factory function
+CMD ["/app/.venv/bin/uvicorn", "src.api.app:create_app", "--factory", "--host", "0.0.0.0", "--port", "8080"]
