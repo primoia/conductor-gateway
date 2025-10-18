@@ -9,6 +9,7 @@ from typing import Optional
 
 from bson import ObjectId
 from pymongo.collection import Collection
+from pymongo.database import Database
 from pymongo.errors import DuplicateKeyError
 
 logger = logging.getLogger(__name__)
@@ -17,14 +18,15 @@ logger = logging.getLogger(__name__)
 class ScreenplayService:
     """Service class for managing screenplays in MongoDB."""
 
-    def __init__(self, collection: Collection):
+    def __init__(self, db: Database):
         """
-        Initialize the service with a MongoDB collection.
+        Initialize the service with a MongoDB database.
 
         Args:
-            collection: PyMongo collection instance for screenplays
+            db: PyMongo database instance
         """
-        self.collection = collection
+        self.collection = db["screenplays"]
+        self.agent_instances = db["agent_instances"]
         self._ensure_indexes()
 
     def _ensure_indexes(self):
@@ -233,6 +235,7 @@ class ScreenplayService:
     def delete_screenplay(self, screenplay_id: str) -> bool:
         """
         Soft delete a screenplay (sets isDeleted to True).
+        Also marks all related agent_instances as deleted.
 
         Args:
             screenplay_id: Screenplay ID
@@ -246,6 +249,13 @@ class ScreenplayService:
             logger.warning(f"Invalid screenplay ID format: {screenplay_id}")
             return False
 
+        # First, check if screenplay exists and is not already deleted
+        screenplay = self.collection.find_one({"_id": obj_id, "isDeleted": False})
+        if not screenplay:
+            logger.warning(f"Screenplay not found for deletion: {screenplay_id}")
+            return False
+
+        # Mark screenplay as deleted
         result = self.collection.update_one(
             {"_id": obj_id, "isDeleted": False},
             {"$set": {"isDeleted": True, "updatedAt": datetime.now(UTC)}},
@@ -253,9 +263,23 @@ class ScreenplayService:
 
         if result.modified_count > 0:
             logger.info(f"Soft deleted screenplay: {screenplay_id}")
+
+            # Mark all related agent_instances as deleted
+            instances_result = self.agent_instances.update_many(
+                {"screenplay_id": screenplay_id, "isDeleted": {"$ne": True}},
+                {"$set": {"isDeleted": True, "updated_at": datetime.now(UTC).isoformat()}},
+            )
+
+            if instances_result.modified_count > 0:
+                logger.info(
+                    f"Marked {instances_result.modified_count} agent_instances as deleted "
+                    f"for screenplay: {screenplay_id}"
+                )
+            else:
+                logger.info(f"No agent_instances found for screenplay: {screenplay_id}")
+
             return True
 
-        logger.warning(f"Screenplay not found for deletion: {screenplay_id}")
         return False
 
     def _document_to_dict(self, document: dict) -> dict:

@@ -33,8 +33,7 @@ def init_screenplay_service(db: Database):
         db: MongoDB database instance
     """
     global _screenplay_service
-    collection = db["screenplays"]
-    _screenplay_service = ScreenplayService(collection)
+    _screenplay_service = ScreenplayService(db)
     logger.info("Initialized ScreenplayService")
 
 
