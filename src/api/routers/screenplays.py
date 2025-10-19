@@ -220,6 +220,7 @@ async def update_screenplay(screenplay_id: str, data: ScreenplayUpdate):
             description=data.description,
             tags=data.tags,
             content=data.content,
+            is_deleted=data.is_deleted,
         )
 
         if not document:

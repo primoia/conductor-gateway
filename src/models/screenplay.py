@@ -33,6 +33,7 @@ class ScreenplayUpdate(BaseModel):
     description: Optional[str] = Field(None, max_length=500, description="Screenplay description")
     tags: Optional[list[str]] = Field(None, description="Tags for search and categorization")
     content: Optional[str] = Field(None, description="Markdown content of the screenplay")
+    is_deleted: Optional[bool] = Field(None, alias="isDeleted", description="Soft delete flag")
 
     model_config = ConfigDict(
         json_schema_extra={
@@ -41,6 +42,7 @@ class ScreenplayUpdate(BaseModel):
                 "description": "Updated description",
                 "tags": ["updated", "v2"],
                 "content": "# Updated Content\n\nNew screenplay content here.",
+                "isDeleted": False,
             }
         }
     )

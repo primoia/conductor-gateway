@@ -173,6 +173,7 @@ class ScreenplayService:
         description: Optional[str] = None,
         tags: Optional[list[str]] = None,
         content: Optional[str] = None,
+        is_deleted: Optional[bool] = None,
     ) -> Optional[dict]:
         """
         Update a screenplay and increment its version.
@@ -183,6 +184,7 @@ class ScreenplayService:
             description: Optional new description
             tags: Optional new tags
             content: Optional new content
+            is_deleted: Optional soft delete flag
 
         Returns:
             Updated screenplay document or None if not found
@@ -196,8 +198,8 @@ class ScreenplayService:
             logger.warning(f"Invalid screenplay ID format: {screenplay_id}")
             raise ValueError("Invalid screenplay ID format")
 
-        # Check if screenplay exists and is not deleted
-        existing = self.collection.find_one({"_id": obj_id, "isDeleted": False})
+        # Check if screenplay exists (allow updates even if deleted)
+        existing = self.collection.find_one({"_id": obj_id})
         if not existing:
             logger.warning(f"Screenplay not found for update: {screenplay_id}")
             return None
@@ -223,8 +225,26 @@ class ScreenplayService:
         if content is not None:
             update_doc["$set"]["content"] = content
 
+        if is_deleted is not None:
+            update_doc["$set"]["isDeleted"] = is_deleted
+
         # Perform update
         self.collection.update_one({"_id": obj_id}, update_doc)
+
+        # If marking as deleted, also mark related agent_instances as deleted
+        if is_deleted is True:
+            instances_result = self.agent_instances.update_many(
+                {"screenplay_id": screenplay_id, "isDeleted": {"$ne": True}},
+                {"$set": {"isDeleted": True, "updated_at": datetime.now(UTC).isoformat()}},
+            )
+
+            if instances_result.modified_count > 0:
+                logger.info(
+                    f"Marked {instances_result.modified_count} agent_instances as deleted "
+                    f"for screenplay: {screenplay_id}"
+                )
+            else:
+                logger.info(f"No agent_instances found for screenplay: {screenplay_id}")
 
         # Fetch and return updated document
         updated_doc = self.collection.find_one({"_id": obj_id})

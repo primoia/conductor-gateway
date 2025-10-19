@@ -865,13 +865,134 @@ def create_app() -> FastAPI:
             logger.error(f"Error updating instance cwd: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail=str(e))
 
+    @app.patch("/api/agents/instances/{instance_id}/statistics")
+    async def update_instance_statistics(instance_id: str, payload: dict[str, Any]):
+        """
+        Update execution statistics for a specific agent instance.
+
+        This endpoint supports incremental updates to track task executions.
+
+        Payload:
+        - task_duration: Duration of the task in milliseconds (will be added to totals)
+        - exit_code: Exit code of the task (0 = success, other = error)
+        - increment_count: Whether to increment task count (default: True)
+
+        The endpoint automatically:
+        - Increments task_count
+        - Adds task_duration to total_execution_time
+        - Recalculates average_execution_time
+        - Updates last_task_duration and last_task_completed_at
+        """
+        if mongo_db is None:
+            raise HTTPException(status_code=503, detail="MongoDB connection not available")
+
+        try:
+            task_duration = payload.get("task_duration")
+            exit_code = payload.get("exit_code", 0)
+            increment_count = payload.get("increment_count", True)
+
+            # Validation
+            if task_duration is None or not isinstance(task_duration, (int, float)):
+                raise HTTPException(
+                    status_code=400,
+                    detail={"success": False, "error": "task_duration is required and must be a number"}
+                )
+
+            if task_duration < 0:
+                raise HTTPException(
+                    status_code=400,
+                    detail={"success": False, "error": "task_duration must be positive"}
+                )
+
+            logger.info(f"Updating statistics for instance {instance_id}: duration={task_duration}ms, exit_code={exit_code}")
+
+            agent_instances = mongo_db["agent_instances"]
+
+            # Fetch current instance to calculate new statistics
+            current_instance = agent_instances.find_one({"instance_id": instance_id})
+            if not current_instance:
+                logger.warning(f"Instance {instance_id} not found")
+                raise HTTPException(status_code=404, detail={"success": False, "error": "Instance not found"})
+
+            # Get current statistics or initialize
+            current_stats = current_instance.get("statistics", {})
+            current_task_count = current_stats.get("task_count", 0)
+            current_total_time = current_stats.get("total_execution_time", 0.0)
+            current_success_count = current_stats.get("success_count", 0)
+            current_error_count = current_stats.get("error_count", 0)
+
+            # Calculate new statistics
+            new_task_count = current_task_count + 1 if increment_count else current_task_count
+            new_total_time = current_total_time + task_duration
+            new_average_time = new_total_time / new_task_count if new_task_count > 0 else 0.0
+
+            # Update success/error counts
+            new_success_count = current_success_count + (1 if exit_code == 0 else 0)
+            new_error_count = current_error_count + (1 if exit_code != 0 else 0)
+
+            # Build update document
+            now = datetime.now().isoformat()
+            update_doc = {
+                "$set": {
+                    "statistics": {
+                        "task_count": new_task_count,
+                        "total_execution_time": new_total_time,
+                        "average_execution_time": new_average_time,
+                        "last_task_duration": task_duration,
+                        "last_task_completed_at": now,
+                        "success_count": new_success_count,
+                        "error_count": new_error_count,
+                        "last_exit_code": exit_code
+                    },
+                    "updated_at": now,
+                    "last_execution": now
+                }
+            }
+
+            # Update MongoDB
+            result = agent_instances.update_one(
+                {"instance_id": instance_id},
+                update_doc
+            )
+
+            if result.matched_count == 0:
+                logger.warning(f"Instance {instance_id} not found during update")
+                raise HTTPException(status_code=404, detail={"success": False, "error": "Instance not found"})
+
+            logger.info(
+                f"Successfully updated statistics for instance {instance_id}: "
+                f"count={new_task_count}, total={new_total_time}ms, avg={new_average_time:.2f}ms"
+            )
+
+            return {
+                "success": True,
+                "message": "Statistics updated successfully",
+                "instance_id": instance_id,
+                "statistics": {
+                    "task_count": new_task_count,
+                    "total_execution_time": new_total_time,
+                    "average_execution_time": new_average_time,
+                    "last_task_duration": task_duration,
+                    "success_count": new_success_count,
+                    "error_count": new_error_count,
+                    "success_rate": (new_success_count / new_task_count * 100) if new_task_count > 0 else 0.0
+                }
+            }
+
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Error updating instance statistics: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail={"success": False, "error": str(e)})
+
     @app.get("/api/agents/instances")
     async def list_agent_instances(
         agent_id: str = None,
         status: str = None,
         limit: int = 100,
         offset: int = 0,
-        sort: str = "-created_at"
+        sort: str = "-created_at",
+        include_deleted: bool = False
     ):
         """
         List all agent instances with optional filtering.
@@ -882,6 +1003,7 @@ def create_app() -> FastAPI:
         - limit: Maximum number of results (default: 100, max: 500)
         - offset: Pagination offset (default: 0)
         - sort: Sort field, prefix with '-' for descending (default: -created_at)
+        - include_deleted: Include soft-deleted instances (default: False)
         """
         if mongo_db is None:
             raise HTTPException(status_code=503, detail="MongoDB connection not available")
@@ -893,6 +1015,10 @@ def create_app() -> FastAPI:
                 query_filter["agent_id"] = agent_id
             if status:
                 query_filter["status"] = status
+            
+            # Filter out deleted instances by default
+            if not include_deleted:
+                query_filter["isDeleted"] = {"$ne": True}
 
             # Validate and apply limits
             limit = max(1, min(limit, 500))  # Between 1 and 500
@@ -937,7 +1063,7 @@ def create_app() -> FastAPI:
             logger.info(f"Fetching agent instance: {instance_id}")
 
             agent_instances = mongo_db["agent_instances"]
-            doc = agent_instances.find_one({"instance_id": instance_id})
+            doc = agent_instances.find_one({"instance_id": instance_id, "isDeleted": {"$ne": True}})
 
             if not doc:
                 logger.warning(f"Instance {instance_id} not found")
