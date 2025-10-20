@@ -1,0 +1,196 @@
+{
+  "saga_id": "SAGA-008",
+  "saga_name": "API de Edição de Persona no Conductor Gateway",
+  "status": "planned",
+  "created_at": "2025-01-19T10:30:00Z",
+  "updated_at": "2025-01-19T10:30:00Z",
+  "phases": [
+    {
+      "phase_id": "fase-1",
+      "phase_name": "Core APIs",
+      "status": "pending",
+      "estimated_hours": 8,
+      "complexity": "medium",
+      "dependencies": [],
+      "deliverables": [
+        "Endpoint PUT /api/agents/{agent_id}/persona",
+        "Modelos Pydantic básicos",
+        "Validação de persona",
+        "Serviço de persona",
+        "Testes unitários"
+      ],
+      "risks": [
+        "Performance na validação de markdown",
+        "Concorrência em edições simultâneas",
+        "Validação de persona malformada"
+      ],
+      "success_criteria": [
+        "Endpoint PUT funcionando corretamente",
+        "Validação impedindo dados inválidos",
+        "Resposta < 200ms",
+        "Cobertura de testes > 80%"
+      ]
+    },
+    {
+      "phase_id": "fase-2",
+      "phase_name": "Versionamento",
+      "status": "pending",
+      "estimated_hours": 12,
+      "complexity": "high",
+      "dependencies": ["fase-1"],
+      "deliverables": [
+        "Collection persona_history",
+        "PersonaVersionManager",
+        "Endpoint GET /api/agents/{agent_id}/persona/history",
+        "Sistema de limpeza automática",
+        "Índices otimizados"
+      ],
+      "risks": [
+        "Crescimento excessivo do histórico",
+        "Consumo de storage",
+        "Concorrência em múltiplas edições",
+        "Perda de versões durante limpeza"
+      ],
+      "success_criteria": [
+        "Histórico funcionando corretamente",
+        "Paginação implementada",
+        "Limpeza automática funcionando",
+        "Resposta < 200ms para consultas"
+      ]
+    },
+    {
+      "phase_id": "fase-3",
+      "phase_name": "Backup/Restore",
+      "status": "pending",
+      "estimated_hours": 10,
+      "complexity": "high",
+      "dependencies": ["fase-2"],
+      "deliverables": [
+        "Collection persona_backups",
+        "PersonaBackupManager",
+        "Endpoints de backup/restore",
+        "Sistema de validação de integridade",
+        "Backup automático antes de restore"
+      ],
+      "risks": [
+        "Perda de dados durante restore",
+        "Backup corrompido",
+        "Conflitos em restores simultâneos",
+        "Consumo excessivo de storage"
+      ],
+      "success_criteria": [
+        "Backup manual funcionando",
+        "Restore sem perda de dados",
+        "Validação de integridade",
+        "Backup automático antes de restore"
+      ]
+    },
+    {
+      "phase_id": "fase-4",
+      "phase_name": "Melhorias",
+      "status": "pending",
+      "estimated_hours": 16,
+      "complexity": "very_high",
+      "dependencies": ["fase-3"],
+      "deliverables": [
+        "Cache Redis implementado",
+        "Logging estruturado",
+        "Documentação OpenAPI completa",
+        "Testes end-to-end",
+        "Monitoramento e alertas"
+      ],
+      "risks": [
+        "Cache causando inconsistências",
+        "Complexidade excessiva",
+        "Documentação desatualizada",
+        "Consumo de recursos do monitoramento"
+      ],
+      "success_criteria": [
+        "Resposta < 100ms",
+        "Cache hit rate > 80%",
+        "Cobertura de testes > 95%",
+        "Documentação 100% atualizada"
+      ]
+    }
+  ],
+  "overall_metrics": {
+    "total_estimated_hours": 46,
+    "total_phases": 4,
+    "complexity_distribution": {
+      "medium": 1,
+      "high": 2,
+      "very_high": 1
+    },
+    "risk_level": "medium",
+    "success_probability": 0.85
+  },
+  "dependencies": {
+    "internal": [
+      "MongoDB connection (existente)",
+      "FastAPI framework (existente)",
+      "Pydantic models (existente)",
+      "Logging system (existente)"
+    ],
+    "external": [],
+    "frontend": [
+      "Frontend deve implementar chamadas para novos endpoints",
+      "Frontend deve tratar novos códigos de erro",
+      "Frontend deve implementar UI para histórico/backup"
+    ]
+  },
+  "risks": {
+    "technical": [
+      "Performance: Histórico pode crescer muito",
+      "Concorrência: Múltiplas edições simultâneas",
+      "Validação: Persona malformada pode quebrar frontend"
+    ],
+    "business": [
+      "Perda de Dados: Edições acidentais",
+      "Auditoria: Falta de rastreabilidade",
+      "Segurança: Edição não autorizada"
+    ],
+    "mitigations": [
+      "Implementar limpeza automática de versões",
+      "Usar versioning otimista",
+      "Validação rigorosa de entrada",
+      "Backup automático antes de alterações",
+      "Logging detalhado para auditoria",
+      "Validação de permissões"
+    ]
+  },
+  "success_criteria": {
+    "technical": [
+      "Todos os endpoints funcionando com < 200ms",
+      "Validação de persona impedindo dados malformados",
+      "Histórico de versões funcionando corretamente",
+      "Backup/restore funcionando sem perda de dados",
+      "Cobertura de testes > 90%"
+    ],
+    "business": [
+      "Frontend pode editar persona sem erros",
+      "Histórico de alterações visível para usuários",
+      "Backup de persona funcionando",
+      "Logs de auditoria completos",
+      "Zero perda de dados durante edições"
+    ],
+    "quality": [
+      "Código seguindo padrões do projeto",
+      "Documentação da API atualizada",
+      "Logs estruturados para monitoramento",
+      "Tratamento de erros robusto"
+    ]
+  },
+  "next_actions": [
+    "Validar planos com a equipe",
+    "Iniciar Fase 1 (Core APIs)",
+    "Delegar implementação para desenvolvedor backend",
+    "Configurar ambiente de desenvolvimento"
+  ],
+  "notes": [
+    "Saga bem estruturada em 4 fases incrementais",
+    "Estimativa total de 46 horas é realista",
+    "Riscos identificados e mitigações planejadas",
+    "Dependências mínimas, principalmente internas",
+    "Critérios de sucesso claros e mensuráveis"
+  ]
+}

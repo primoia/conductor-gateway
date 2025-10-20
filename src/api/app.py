@@ -20,6 +20,9 @@ from fastapi.responses import StreamingResponse
 from pymongo import MongoClient
 
 from src.api.routers.screenplays import init_screenplay_service, router as screenplays_router
+from src.api.routers.persona import router as persona_router
+from src.api.routers.persona_version import router as persona_version_router
+from src.core.database import init_database, close_database
 from src.clients.conductor_client import ConductorClient
 from src.config.settings import CONDUCTOR_CONFIG, MONGODB_CONFIG, SERVER_CONFIG
 from src.utils.mcp_utils import init_agent
@@ -212,6 +215,10 @@ async def lifespan(app: FastAPI):
         # Initialize screenplay service
         init_screenplay_service(mongo_db)
         logger.info("Initialized ScreenplayService with MongoDB connection")
+        
+        # Initialize database for persona service
+        init_database()
+        logger.info("Initialized database connection for persona service")
     except Exception as e:
         logger.error(f"Failed to connect to MongoDB: {e}")
         mongo_client = None
@@ -243,6 +250,10 @@ async def lifespan(app: FastAPI):
     if mongo_client:
         mongo_client.close()
         logger.info("MongoDB connection closed")
+    
+    # Close database connection
+    close_database()
+    logger.info("Database connection closed")
 
 
 def create_app() -> FastAPI:
@@ -269,6 +280,8 @@ def create_app() -> FastAPI:
 
     # Include routers
     app.include_router(screenplays_router)
+    app.include_router(persona_router)
+    app.include_router(persona_version_router)
 
     # SSE Streaming Endpoints - Following Plan2 Hybrid REST + EventSource pattern
 
