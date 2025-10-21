@@ -1212,12 +1212,21 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=500, detail=str(e))
 
     @app.delete("/api/agents/instances/{instance_id}")
-    async def delete_agent_instance(instance_id: str, cascade: bool = False):
+    async def delete_agent_instance(instance_id: str, hard: bool = False, cascade: bool = False):
         """
-        Delete an agent instance and optionally its related data.
+        Delete an agent instance (soft delete by default).
 
         Query parameters:
-        - cascade: If true, also delete related history and logs (default: false)
+        - hard: If true, performs a hard delete (permanent removal). Default: false (soft delete)
+        - cascade: If true with hard delete, also delete related history and logs (default: false)
+
+        Soft delete (default):
+        - Sets isDeleted=true on the instance
+        - Instance remains in database but is filtered from normal queries
+
+        Hard delete (hard=true):
+        - Permanently removes the instance from database
+        - If cascade=true, also removes related data
         """
         if mongo_db is None:
             raise HTTPException(status_code=503, detail="MongoDB connection not available")
@@ -1238,6 +1247,32 @@ def create_app() -> FastAPI:
                     }
                 )
 
+            # SOFT DELETE (default behavior)
+            if not hard:
+                logger.info(f"Soft deleting instance {instance_id} (setting isDeleted=true)")
+
+                result = agent_instances.update_one(
+                    {"instance_id": instance_id},
+                    {
+                        "$set": {
+                            "isDeleted": True,
+                            "deleted_at": datetime.now().isoformat(),
+                            "updated_at": datetime.now().isoformat()
+                        }
+                    }
+                )
+
+                logger.info(f"Successfully soft deleted instance {instance_id}")
+
+                return {
+                    "success": True,
+                    "message": "Instance soft deleted successfully (marked as deleted)",
+                    "instance_id": instance_id,
+                    "deletion_type": "soft",
+                    "isDeleted": True
+                }
+
+            # HARD DELETE (permanent removal)
             cascade_deleted = {}
 
             # Delete related data if cascade=true
@@ -1261,16 +1296,17 @@ def create_app() -> FastAPI:
                     conv_result = conversations_collection.delete_many({"instance_id": instance_id})
                     cascade_deleted["conversation_records"] = conv_result.deleted_count
 
-            # Delete the instance itself
-            logger.info(f"Deleting instance {instance_id}")
+            # Delete the instance itself (permanent)
+            logger.info(f"Hard deleting instance {instance_id} (permanent removal)")
             result = agent_instances.delete_one({"instance_id": instance_id})
 
-            logger.info(f"Successfully deleted instance {instance_id}, cascade_deleted: {cascade_deleted}")
+            logger.info(f"Successfully hard deleted instance {instance_id}, cascade_deleted: {cascade_deleted}")
 
             return {
                 "success": True,
-                "message": "Instance deleted successfully",
+                "message": "Instance permanently deleted",
                 "instance_id": instance_id,
+                "deletion_type": "hard",
                 "cascade_deleted": cascade_deleted if cascade else None
             }
 
