@@ -19,7 +19,7 @@ def load_config():
         "conductor": {
             "project_path": "/mnt/ramdisk/primoia-main/primoia-monorepo/projects/conductor",
             "scripts_path": "scripts",
-            "timeout": 300,
+            "timeout": 600,
             "conductor_api_url": "http://conductor-api:8000",
         },
         "mongodb": {
