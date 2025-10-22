@@ -5,7 +5,7 @@ Implements CRUD operations for screenplay management.
 
 import logging
 
-from fastapi import APIRouter, HTTPException, Query, status
+from fastapi import APIRouter, Body, HTTPException, Query, status
 from pymongo.database import Database
 
 from src.models.screenplay import (
@@ -452,4 +452,65 @@ async def rename_screenplay(screenplay_id: str, data: RenameRequest):
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
     except Exception as e:
         logger.error(f"Error renaming screenplay {screenplay_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+
+
+@router.patch("/{screenplay_id}/working-directory")
+async def update_screenplay_working_directory(
+    screenplay_id: str,
+    working_directory: str = Body(..., embed=True, description="Working directory path")
+):
+    """
+    Update the working directory for a screenplay.
+
+    This working directory will be inherited by all new agent instances created from this screenplay.
+
+    Args:
+        screenplay_id: Screenplay ID
+        working_directory: Absolute path to the working directory
+
+    Returns:
+        Success message
+
+    Raises:
+        HTTPException: If screenplay not found, invalid path, or service unavailable
+    """
+    service = get_service()
+
+    # Basic validation
+    if not working_directory:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="working_directory is required"
+        )
+
+    if not working_directory.startswith('/'):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="working_directory must be an absolute path (start with /)"
+        )
+
+    try:
+        result = service.update_screenplay_working_directory(
+            screenplay_id=screenplay_id,
+            working_directory=working_directory
+        )
+
+        if not result:
+            logger.warning(f"Screenplay not found for working directory update: {screenplay_id}")
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Screenplay with id '{screenplay_id}' not found"
+            )
+
+        logger.info(f"Updated working directory for screenplay {screenplay_id}: {working_directory}")
+        return {
+            "message": "Working directory updated successfully",
+            "working_directory": working_directory
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating working directory for screenplay {screenplay_id}: {e}", exc_info=True)
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))

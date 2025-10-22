@@ -499,6 +499,50 @@ class ScreenplayService:
 
         return updated_doc
 
+    def update_screenplay_working_directory(self, screenplay_id: str, working_directory: str) -> bool:
+        """
+        Update the working directory for a screenplay.
+
+        Args:
+            screenplay_id: Screenplay ID
+            working_directory: Absolute path to the working directory
+
+        Returns:
+            True if successful, False if screenplay not found
+
+        Raises:
+            ValueError: If invalid ID format
+        """
+        try:
+            obj_id = ObjectId(screenplay_id)
+        except Exception:
+            logger.warning(f"Invalid screenplay ID format: {screenplay_id}")
+            raise ValueError("Invalid screenplay ID format")
+
+        # Check if screenplay exists
+        existing = self.collection.find_one({"_id": obj_id, "isDeleted": False})
+        if not existing:
+            logger.warning(f"Screenplay not found: {screenplay_id}")
+            return False
+
+        # Update working directory
+        from datetime import datetime
+        result = self.collection.update_one(
+            {"_id": obj_id},
+            {
+                "$set": {
+                    "working_directory": working_directory,
+                    "updatedAt": datetime.now().isoformat()
+                }
+            }
+        )
+
+        if result.modified_count > 0:
+            logger.info(f"Updated working directory for screenplay {screenplay_id}: {working_directory}")
+            return True
+
+        return False
+
     def delete_screenplay(self, screenplay_id: str) -> bool:
         """
         Soft delete a screenplay (sets isDeleted to True).

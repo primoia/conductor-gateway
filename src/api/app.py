@@ -792,8 +792,24 @@ def create_app() -> FastAPI:
                 logger.warning(f"   - ❌ screenplay_id não foi adicionado (valor: {screenplay_id})")
 
             # Add optional fields if provided
-            if "cwd" in payload:
-                insert_doc["cwd"] = payload["cwd"]
+            # CWD: Try to inherit from screenplay if not provided
+            cwd = payload.get("cwd")
+            if not cwd and screenplay_id:
+                # Try to get working_directory from screenplay
+                try:
+                    from bson import ObjectId
+                    screenplays = mongo_db["screenplays"]
+                    screenplay = screenplays.find_one(
+                        {"_id": ObjectId(screenplay_id), "isDeleted": False}
+                    )
+                    if screenplay and screenplay.get("working_directory"):
+                        cwd = screenplay["working_directory"]
+                        logger.info(f"✅ [AGENT INSTANCE] Herdando CWD do screenplay {screenplay_id}: {cwd}")
+                except Exception as e:
+                    logger.warning(f"⚠️ [AGENT INSTANCE] Erro ao buscar working_directory do screenplay: {e}")
+
+            if cwd:
+                insert_doc["cwd"] = cwd
             if "config" in payload:
                 insert_doc["config"] = payload["config"]
             if "emoji" in payload:
