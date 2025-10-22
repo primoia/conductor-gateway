@@ -12,6 +12,11 @@ from pymongo.collection import Collection
 from pymongo.database import Database
 from pymongo.errors import DuplicateKeyError
 
+from src.utils.file_path_validator import validate_file_path, sanitize_file_path
+from src.utils.markdown_validator import validate_markdown_content, validate_markdown_file_extension, sanitize_markdown_content
+from src.utils.duplicate_detector import generate_file_key, generate_content_hash, is_same_file_path, is_same_file_content
+from src.middleware.validation_middleware import ValidationMiddleware
+
 logger = logging.getLogger(__name__)
 
 
@@ -45,11 +50,35 @@ class ScreenplayService:
                 [("name", "text"), ("description", "text"), ("tags", "text")]
             )
             logger.info("Created text index on screenplays for search")
+
+            # Index for file path queries
+            self.collection.create_index("filePath")
+            logger.info("Created index on screenplays.filePath")
+            
+            # Index for import/export paths
+            self.collection.create_index("importPath")
+            self.collection.create_index("exportPath")
+            logger.info("Created indexes on screenplays.importPath and exportPath")
+            
+            # Index for file key (duplicate detection)
+            self.collection.create_index("fileKey")
+            logger.info("Created index on screenplays.fileKey")
+            
+            # Index for content hash (duplicate detection)
+            self.collection.create_index("contentHash")
+            logger.info("Created index on screenplays.contentHash")
         except Exception as e:
             logger.warning(f"Index creation warning (may already exist): {e}")
 
     def create_screenplay(
-        self, name: str, description: Optional[str] = None, tags: Optional[list[str]] = None
+        self, 
+        name: str, 
+        description: Optional[str] = None, 
+        tags: Optional[list[str]] = None, 
+        file_path: Optional[str] = None,
+        import_path: Optional[str] = None,
+        export_path: Optional[str] = None,
+        content: Optional[str] = None
     ) -> dict:
         """
         Create a new screenplay with default content.
@@ -58,19 +87,54 @@ class ScreenplayService:
             name: Unique screenplay name
             description: Optional description
             tags: Optional list of tags
+            file_path: Optional full path to the markdown file on disk
+            import_path: Optional path from which the screenplay was imported
+            export_path: Optional last path where the screenplay was exported
+            content: Optional custom content (defaults to template if not provided)
 
         Returns:
             Created screenplay document
 
         Raises:
-            ValueError: If screenplay with the same name already exists
+            ValueError: If screenplay with the same name already exists or invalid file_path
         """
+        # Validate name using middleware
+        name = ValidationMiddleware.validate_screenplay_name(name)
+        
+        # Validate description and tags using middleware
+        description = ValidationMiddleware.validate_description(description)
+        tags = ValidationMiddleware.validate_tags(tags)
+        
+        # Validate and sanitize file paths using middleware
+        file_path, import_path, export_path = ValidationMiddleware.validate_file_paths(
+            file_path=file_path,
+            import_path=import_path,
+            export_path=export_path
+        )
+
+        # Validate content if provided
+        if content is not None:
+            content = ValidationMiddleware.validate_markdown_content(content)
+        else:
+            content = "# Novo Roteiro\n\nComece a escrever seu roteiro aqui..."
+
+        # Generate file key for duplicate detection
+        file_key = None
+        if file_path:
+            from src.utils.duplicate_detector import extract_file_name_from_path
+            file_name = extract_file_name_from_path(file_path)
+            file_key = generate_file_key(file_path, file_name)
+
         now = datetime.now(UTC)
         document = {
             "name": name,
             "description": description or "",
             "tags": tags or [],
-            "content": "# Novo Roteiro\n\nComece a escrever seu roteiro aqui...",
+            "content": content,
+            "filePath": file_path,
+            "importPath": import_path,
+            "exportPath": export_path,
+            "fileKey": file_key,
             "isDeleted": False,
             "version": 1,
             "createdAt": now,
@@ -85,6 +149,76 @@ class ScreenplayService:
         except DuplicateKeyError:
             logger.error(f"Screenplay with name '{name}' already exists")
             raise ValueError(f"Screenplay with name '{name}' already exists")
+
+    def validate_markdown_content(self, content: str) -> dict:
+        """
+        Validate Markdown content.
+
+        Args:
+            content: Markdown content to validate
+
+        Returns:
+            Dictionary with validation results
+        """
+        is_valid, errors, warnings = validate_markdown_content(content)
+        return {
+            "is_valid": is_valid,
+            "errors": errors,
+            "warnings": warnings
+        }
+
+    def check_duplicate_by_path(self, file_path: str, file_name: str, exclude_id: Optional[str] = None) -> Optional[dict]:
+        """
+        Check if a screenplay with the same file path already exists.
+
+        Args:
+            file_path: File path to check
+            file_name: File name to check
+            exclude_id: Screenplay ID to exclude from check
+
+        Returns:
+            Duplicate screenplay document or None
+        """
+        file_key = generate_file_key(file_path, file_name)
+        
+        query = {"fileKey": file_key, "isDeleted": False}
+        if exclude_id:
+            try:
+                obj_id = ObjectId(exclude_id)
+                query["_id"] = {"$ne": obj_id}
+            except Exception:
+                logger.warning(f"Invalid exclude_id format: {exclude_id}")
+
+        duplicate = self.collection.find_one(query)
+        if duplicate:
+            logger.info(f"Found duplicate screenplay by file key: {file_key}")
+        return duplicate
+
+    def check_duplicate_by_content(self, content: str, exclude_id: Optional[str] = None) -> Optional[dict]:
+        """
+        Check if a screenplay with the same content already exists.
+
+        Args:
+            content: Content to check
+            exclude_id: Screenplay ID to exclude from check
+
+        Returns:
+            Duplicate screenplay document or None
+        """
+        content_hash = generate_content_hash(content)
+        
+        query = {"contentHash": content_hash, "isDeleted": False}
+        if exclude_id:
+            try:
+                obj_id = ObjectId(exclude_id)
+                query["_id"] = {"$ne": obj_id}
+            except Exception:
+                logger.warning(f"Invalid exclude_id format: {exclude_id}")
+
+        duplicate = self.collection.find_one(query)
+        if duplicate:
+            logger.info(f"Found duplicate screenplay by content hash")
+        return duplicate
 
     def get_screenplay_by_id(self, screenplay_id: str) -> Optional[dict]:
         """
@@ -173,6 +307,9 @@ class ScreenplayService:
         description: Optional[str] = None,
         tags: Optional[list[str]] = None,
         content: Optional[str] = None,
+        file_path: Optional[str] = None,
+        import_path: Optional[str] = None,
+        export_path: Optional[str] = None,
         is_deleted: Optional[bool] = None,
     ) -> Optional[dict]:
         """
@@ -184,13 +321,16 @@ class ScreenplayService:
             description: Optional new description
             tags: Optional new tags
             content: Optional new content
+            file_path: Optional new file path
+            import_path: Optional new import path
+            export_path: Optional new export path
             is_deleted: Optional soft delete flag
 
         Returns:
             Updated screenplay document or None if not found
 
         Raises:
-            ValueError: If name conflict or invalid ID
+            ValueError: If name conflict, invalid ID, or invalid file_path
         """
         try:
             obj_id = ObjectId(screenplay_id)
@@ -208,6 +348,9 @@ class ScreenplayService:
         update_doc = {"$set": {"updatedAt": datetime.now(UTC)}, "$inc": {"version": 1}}
 
         if name is not None:
+            # Validate name using middleware
+            name = ValidationMiddleware.validate_screenplay_name(name)
+            
             # Check for name conflicts
             if name != existing.get("name"):
                 conflict = self.collection.find_one({"name": name})
@@ -217,13 +360,40 @@ class ScreenplayService:
             update_doc["$set"]["name"] = name
 
         if description is not None:
+            description = ValidationMiddleware.validate_description(description)
             update_doc["$set"]["description"] = description
 
         if tags is not None:
+            tags = ValidationMiddleware.validate_tags(tags)
             update_doc["$set"]["tags"] = tags
 
         if content is not None:
+            # Validate and sanitize content using middleware
+            content = ValidationMiddleware.validate_markdown_content(content)
             update_doc["$set"]["content"] = content
+            # Update content hash for duplicate detection
+            update_doc["$set"]["contentHash"] = generate_content_hash(content)
+
+        # Validate and update file paths using middleware
+        if file_path is not None or import_path is not None or export_path is not None:
+            validated_file_path, validated_import_path, validated_export_path = ValidationMiddleware.validate_file_paths(
+                file_path=file_path,
+                import_path=import_path,
+                export_path=export_path
+            )
+            
+            if validated_file_path is not None:
+                update_doc["$set"]["filePath"] = validated_file_path
+                # Update file key for duplicate detection
+                from src.utils.duplicate_detector import extract_file_name_from_path
+                file_name = extract_file_name_from_path(validated_file_path)
+                update_doc["$set"]["fileKey"] = generate_file_key(validated_file_path, file_name)
+            
+            if validated_import_path is not None:
+                update_doc["$set"]["importPath"] = validated_import_path
+            
+            if validated_export_path is not None:
+                update_doc["$set"]["exportPath"] = validated_export_path
 
         if is_deleted is not None:
             update_doc["$set"]["isDeleted"] = is_deleted
@@ -249,6 +419,83 @@ class ScreenplayService:
         # Fetch and return updated document
         updated_doc = self.collection.find_one({"_id": obj_id})
         logger.info(f"Updated screenplay: {screenplay_id} (new version: {updated_doc['version']})")
+
+        return updated_doc
+
+    def rename_screenplay(self, screenplay_id: str, new_name: str, update_file_paths: bool = True) -> Optional[dict]:
+        """
+        Rename a screenplay and optionally update file paths.
+
+        Args:
+            screenplay_id: Screenplay ID
+            new_name: New name for the screenplay
+            update_file_paths: Whether to update file paths with new name
+
+        Returns:
+            Updated screenplay document or None if not found
+
+        Raises:
+            ValueError: If name conflict or invalid ID
+        """
+        try:
+            obj_id = ObjectId(screenplay_id)
+        except Exception:
+            logger.warning(f"Invalid screenplay ID format: {screenplay_id}")
+            raise ValueError("Invalid screenplay ID format")
+
+        # Check if screenplay exists
+        existing = self.collection.find_one({"_id": obj_id, "isDeleted": False})
+        if not existing:
+            logger.warning(f"Screenplay not found for rename: {screenplay_id}")
+            return None
+
+        # Validate new name using middleware
+        new_name = ValidationMiddleware.validate_screenplay_name(new_name)
+        
+        # Check for name conflicts
+        if new_name != existing.get("name"):
+            conflict = self.collection.find_one({"name": new_name, "isDeleted": False})
+            if conflict:
+                logger.error(f"Name conflict during rename: {new_name}")
+                raise ValueError(f"Screenplay with name '{new_name}' already exists")
+
+        # Build update document
+        update_doc = {
+            "$set": {
+                "name": new_name,
+                "updatedAt": datetime.now(UTC)
+            },
+            "$inc": {"version": 1}
+        }
+
+        # Update file paths if requested
+        if update_file_paths:
+            current_file_path = existing.get("filePath")
+            if current_file_path:
+                from src.utils.duplicate_detector import extract_file_name_from_path
+                from pathlib import Path
+                
+                # Extract directory and extension
+                path_obj = Path(current_file_path)
+                directory = str(path_obj.parent)
+                extension = path_obj.suffix
+                
+                # Create new file path with new name
+                new_file_path = f"{directory}/{new_name}{extension}"
+                new_file_path = sanitize_file_path(new_file_path)
+                
+                if new_file_path and validate_file_path(new_file_path):
+                    update_doc["$set"]["filePath"] = new_file_path
+                    # Update file key
+                    file_name = extract_file_name_from_path(new_file_path)
+                    update_doc["$set"]["fileKey"] = generate_file_key(new_file_path, file_name)
+
+        # Perform update
+        self.collection.update_one({"_id": obj_id}, update_doc)
+
+        # Fetch and return updated document
+        updated_doc = self.collection.find_one({"_id": obj_id})
+        logger.info(f"Renamed screenplay: {screenplay_id} to '{new_name}' (new version: {updated_doc['version']})")
 
         return updated_doc
 
