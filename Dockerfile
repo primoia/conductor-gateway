@@ -27,4 +27,5 @@ EXPOSE 8080
 EXPOSE 8006
 
 # Command to start the server - use uvicorn with factory function
-CMD ["/app/.venv/bin/uvicorn", "src.api.app:create_app", "--factory", "--host", "0.0.0.0", "--port", "8080"]
+# timeout-keep-alive controls how long to wait for clients (10 minutes = 600s)
+CMD ["/app/.venv/bin/uvicorn", "src.api.app:create_app", "--factory", "--host", "0.0.0.0", "--port", "8080", "--timeout-keep-alive", "600"]

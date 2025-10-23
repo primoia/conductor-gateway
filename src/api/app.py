@@ -22,6 +22,7 @@ from pymongo import MongoClient
 from src.api.routers.screenplays import init_screenplay_service, router as screenplays_router
 from src.api.routers.persona import router as persona_router
 from src.api.routers.persona_version import router as persona_version_router
+from src.api.models import AgentExecuteRequest
 from src.core.database import init_database, close_database
 from src.clients.conductor_client import ConductorClient
 from src.config.settings import CONDUCTOR_CONFIG, MONGODB_CONFIG, SERVER_CONFIG
@@ -429,7 +430,7 @@ def create_app() -> FastAPI:
             logger.debug(f"[Proxy /conductor/execute] Full payload: {payload}")
 
             # Forward request to internal conductor-api with custom timeout
-            timeout_value = payload.get("timeout", 300)
+            timeout_value = payload.get("timeout", 600)
             async with httpx.AsyncClient(timeout=httpx.Timeout(timeout_value + 10)) as client:
                 response = await client.post(url, json=payload)
                 response.raise_for_status()
@@ -465,7 +466,7 @@ def create_app() -> FastAPI:
             agent_id = payload.get("agent_id")
             input_text = payload.get("input_text")
             cwd = payload.get("cwd")
-            timeout = payload.get("timeout", 300)
+            timeout = payload.get("timeout", 600)
             instance_id = payload.get("instance_id")
 
             if not agent_id or not input_text or not cwd:
@@ -561,7 +562,7 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=500, detail=str(e))
 
     @app.post("/api/agents/{agent_id}/execute")
-    async def execute_agent_by_id(agent_id: str, payload: dict[str, Any]):
+    async def execute_agent_by_id(agent_id: str, request: AgentExecuteRequest):
         """
         Execute a specific agent with input text and optional instance_id for context isolation.
 
@@ -572,7 +573,8 @@ def create_app() -> FastAPI:
             "context_mode": "stateful|stateless",
             "screenplay_id": "optional-screenplay-id",
             "document_id": "optional-document-id (deprecated, use screenplay_id)",
-            "position": {"x": 100, "y": 200}
+            "position": {"x": 100, "y": 200},
+            "ai_provider": "claude|gemini|openai|etc"
         }
         """
         if mongo_db is None:
@@ -582,16 +584,16 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=503, detail="Conductor client not available")
 
         try:
-            # Validate payload
-            input_text = payload.get("input_text")
-            instance_id = payload.get("instance_id")
-            context_mode = payload.get("context_mode", "stateless")
-            document_id = payload.get("document_id")
-            position = payload.get("position")
-            cwd = payload.get("cwd")  # Extract cwd from payload
-            
+            # Extract fields from request model
+            input_text = request.input_text
+            instance_id = request.instance_id
+            context_mode = request.context_mode
+            cwd = request.cwd
+            position = request.position
+            ai_provider = request.ai_provider
+
             # Extract screenplay_id (support both screenplay_id and document_id for backward compatibility)
-            screenplay_id = payload.get("screenplay_id") or payload.get("document_id")
+            screenplay_id = request.screenplay_id or request.document_id
 
             logger.info("=" * 80)
             logger.info(f"📥 [GATEWAY] Requisição recebida em /api/agents/{agent_id}/execute")
@@ -600,7 +602,7 @@ def create_app() -> FastAPI:
             logger.info(f"   - input_text: {input_text[:100] if input_text else None}...")
             logger.info(f"   - context_mode: {context_mode}")
             logger.info(f"   - cwd: {cwd or 'não fornecido (usará default)'}")
-            logger.info(f"   - Payload completo: {payload}")
+            logger.info(f"   - ai_provider: {ai_provider}")
             logger.info("=" * 80)
 
             if not input_text:
@@ -632,6 +634,7 @@ def create_app() -> FastAPI:
             logger.info(f"   - instance_id: {instance_id}")
             logger.info(f"   - context_mode: {context_mode}")
             logger.info(f"   - cwd final: {final_cwd}")
+            logger.info(f"   - ai_provider: {ai_provider}")
 
             # Execute the agent via Conductor API
             response = await conductor_client.execute_agent(
@@ -640,7 +643,8 @@ def create_app() -> FastAPI:
                 instance_id=instance_id,
                 context_mode=context_mode,
                 cwd=final_cwd,
-                timeout=CONDUCTOR_CONFIG.get("timeout", 300),
+                timeout=CONDUCTOR_CONFIG.get("timeout", 600),
+                ai_provider=ai_provider,
             )
 
             logger.info(f"✅ [GATEWAY] Resposta recebida do conductor")

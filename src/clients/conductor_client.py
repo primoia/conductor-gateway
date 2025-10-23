@@ -21,7 +21,7 @@ class ConductorClient:
             base_url: Base URL of the Conductor API
         """
         self.base_url = base_url.rstrip("/")
-        self.client = httpx.AsyncClient(timeout=httpx.Timeout(300.0))
+        self.client = httpx.AsyncClient(timeout=httpx.Timeout(600.0))
         logger.info(f"ConductorClient initialized with base_url: {self.base_url}")
 
     async def close(self):
@@ -35,7 +35,8 @@ class ConductorClient:
         instance_id: str | None = None,
         context_mode: str = "stateless",
         cwd: str | None = None,
-        timeout: int = 300,
+        timeout: int = 600,
+        ai_provider: str | None = None,
     ) -> dict[str, Any]:
         """
         Execute an agent via Conductor API.
@@ -47,6 +48,7 @@ class ConductorClient:
             context_mode: Execution mode - "stateless" or "stateful"
             cwd: Working directory for execution
             timeout: Execution timeout in seconds
+            ai_provider: AI provider to use (claude, gemini, openai, etc.)
 
         Returns:
             Response from Conductor API
@@ -70,11 +72,16 @@ class ConductorClient:
         if cwd:
             payload["cwd"] = cwd
 
+        if ai_provider:
+            payload["ai_provider"] = ai_provider
+            logger.info(f"✅ [ConductorClient] ai_provider adicionado ao payload: {ai_provider}")
+
         logger.info("=" * 80)
         logger.info(f"🚀 [ConductorClient] Enviando requisição para Conductor:")
         logger.info(f"   - agent_name: {agent_name}")
         logger.info(f"   - instance_id: {instance_id}")
         logger.info(f"   - context_mode: {context_mode}")
+        logger.info(f"   - ai_provider: {ai_provider}")
         logger.info(f"   - prompt: {prompt[:100]}...")
         logger.info(f"   - Payload completo: {payload}")
         logger.info("=" * 80)
