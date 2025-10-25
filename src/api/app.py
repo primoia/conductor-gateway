@@ -22,6 +22,7 @@ from pymongo import MongoClient
 from src.api.routers.screenplays import init_screenplay_service, router as screenplays_router
 from src.api.routers.persona import router as persona_router
 from src.api.routers.persona_version import router as persona_version_router
+from src.api.routers.councilor import router as councilor_router
 from src.api.models import AgentExecuteRequest
 from src.core.database import init_database, close_database
 from src.clients.conductor_client import ConductorClient
@@ -213,6 +214,26 @@ async def lifespan(app: FastAPI):
         history_collection.create_index([("instance_id", 1), ("timestamp", 1)])
         logger.info("Ensured compound index on history collection [instance_id, timestamp]")
 
+        # Create indexes for councilor system
+        agents_collection = mongo_db["agents"]
+
+        # Drop old non-unique index if exists to recreate as unique
+        try:
+            agents_collection.drop_index("agent_id_1")
+            logger.info("Dropped old non-unique agent_id index")
+        except Exception:
+            pass  # Index doesn't exist or already correct
+
+        agents_collection.create_index("agent_id", unique=True)
+        agents_collection.create_index("is_councilor")
+        logger.info("Created indexes on agents collection")
+
+        councilor_executions = mongo_db["councilor_executions"]
+        councilor_executions.create_index("execution_id", unique=True)
+        councilor_executions.create_index([("councilor_id", 1), ("started_at", -1)])
+        councilor_executions.create_index("councilor_id")
+        logger.info("Created indexes on councilor_executions collection")
+
         # Initialize screenplay service
         init_screenplay_service(mongo_db)
         logger.info("Initialized ScreenplayService with MongoDB connection")
@@ -283,6 +304,7 @@ def create_app() -> FastAPI:
     app.include_router(screenplays_router)
     app.include_router(persona_router)
     app.include_router(persona_version_router)
+    app.include_router(councilor_router)
 
     # SSE Streaming Endpoints - Following Plan2 Hybrid REST + EventSource pattern
 
