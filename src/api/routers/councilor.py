@@ -15,6 +15,7 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from ...core.database import get_database
 from ...services.councilor_service import CouncilorService
+from ...services.councilor_scheduler import CouncilorBackendScheduler
 from ...models.councilor import (
     PromoteToCouncilorRequest,
     UpdateCouncilorConfigRequest,
@@ -33,7 +34,7 @@ logger = logging.getLogger(__name__)
 
 # Initialize router
 router = APIRouter(
-    prefix="/api/agents",
+    prefix="/api/councilors",
     tags=["councilors"],
     responses={404: {"description": "Not found"}},
 )
@@ -46,6 +47,26 @@ def get_councilor_service(
 ) -> CouncilorService:
     """Get councilor service instance"""
     return CouncilorService(db)
+
+
+def get_councilor_scheduler() -> Optional[CouncilorBackendScheduler]:
+    """Get councilor scheduler instance"""
+    from ...api.app import councilor_scheduler
+    return councilor_scheduler
+
+
+# ========== Debug Endpoints ==========
+
+@router.get("/scheduler/jobs")
+async def get_scheduled_jobs(
+    scheduler: Optional[CouncilorBackendScheduler] = Depends(get_councilor_scheduler)
+):
+    """Get list of scheduled jobs for debugging"""
+    if not scheduler:
+        raise HTTPException(status_code=503, detail="Scheduler not available")
+
+    jobs = scheduler.get_scheduled_jobs()
+    return {"jobs": jobs, "count": len(jobs)}
 
 
 # ========== List Endpoints ==========
@@ -91,7 +112,8 @@ async def list_agents(
 async def promote_to_councilor(
     agent_id: str = Path(..., description="Agent ID to promote"),
     request: PromoteToCouncilorRequest = ...,
-    service: CouncilorService = Depends(get_councilor_service)
+    service: CouncilorService = Depends(get_councilor_service),
+    scheduler: Optional[CouncilorBackendScheduler] = Depends(get_councilor_scheduler)
 ):
     """
     Promote an agent to councilor status
@@ -119,6 +141,16 @@ async def promote_to_councilor(
         logger.info(f"⭐ Promoting agent '{agent_id}' to councilor")
 
         agent = await service.promote_to_councilor(agent_id, request)
+
+        # Schedule in backend scheduler if available
+        if scheduler and request.councilor_config.schedule.enabled:
+            try:
+                agent_dict = agent.model_dump() if hasattr(agent, 'model_dump') else agent.dict()
+                await scheduler.schedule_councilor(agent_dict)
+                logger.info(f"✅ Scheduled councilor '{agent_id}' in backend scheduler")
+            except Exception as e:
+                logger.error(f"⚠️ Failed to schedule councilor in backend: {e}")
+                # Don't fail the promotion if scheduling fails
 
         return SuccessResponse(
             success=True,
@@ -152,7 +184,8 @@ async def promote_to_councilor(
 )
 async def demote_councilor(
     agent_id: str = Path(..., description="Agent ID to demote"),
-    service: CouncilorService = Depends(get_councilor_service)
+    service: CouncilorService = Depends(get_councilor_service),
+    scheduler: Optional[CouncilorBackendScheduler] = Depends(get_councilor_scheduler)
 ):
     """
     Remove councilor status from an agent
@@ -171,6 +204,15 @@ async def demote_councilor(
         logger.info(f"🔻 Demoting councilor '{agent_id}'")
 
         agent = await service.demote_councilor(agent_id)
+
+        # Remove from backend scheduler if available
+        if scheduler:
+            try:
+                await scheduler.remove_councilor(agent_id)
+                logger.info(f"✅ Removed '{agent_id}' from scheduler")
+            except Exception as e:
+                logger.error(f"⚠️ Failed to remove from scheduler: {e}")
+                # Don't fail the demotion if scheduler removal fails
 
         return SuccessResponse(
             success=True,
@@ -261,7 +303,8 @@ async def update_councilor_config(
 async def update_schedule(
     agent_id: str = Path(..., description="Agent ID"),
     request: UpdateScheduleRequest = ...,
-    service: CouncilorService = Depends(get_councilor_service)
+    service: CouncilorService = Depends(get_councilor_service),
+    scheduler: Optional[CouncilorBackendScheduler] = Depends(get_councilor_scheduler)
 ):
     """
     Pause or resume councilor schedule
@@ -282,6 +325,18 @@ async def update_schedule(
         logger.info(f"{'▶️' if request.enabled else '⏸️'} {'Resuming' if request.enabled else 'Pausing'} schedule for '{agent_id}'")
 
         schedule = await service.update_schedule(agent_id, request)
+
+        # Update backend scheduler if available
+        if scheduler:
+            try:
+                if request.enabled:
+                    await scheduler.resume_councilor(agent_id)
+                else:
+                    await scheduler.pause_councilor(agent_id)
+                logger.info(f"✅ Scheduler updated for '{agent_id}'")
+            except Exception as e:
+                logger.error(f"⚠️ Failed to update scheduler: {e}")
+                # Don't fail the request if scheduler update fails
 
         return ScheduleResponse(
             success=True,

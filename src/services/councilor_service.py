@@ -37,7 +37,9 @@ class CouncilorService:
     def __init__(self, db: AsyncIOMotorDatabase):
         self.db = db
         self.agents_collection = db.agents
-        self.executions_collection = db.councilor_executions
+        self.tasks_collection = db.tasks  # Usar tasks ao invés de councilor_executions
+        # Manter referência para councilor_executions para migração
+        self.legacy_executions_collection = db.councilor_executions
 
     async def ensure_indexes(self):
         """Create MongoDB indexes for performance"""
@@ -46,14 +48,13 @@ class CouncilorService:
             await self.agents_collection.create_index("agent_id", unique=True)
             await self.agents_collection.create_index("is_councilor")
 
-            # Execution indexes
-            await self.executions_collection.create_index("execution_id", unique=True)
-            await self.executions_collection.create_index([
-                ("councilor_id", 1),
-                ("started_at", -1)
+            # Task indexes for councilor executions
+            await self.tasks_collection.create_index([
+                ("agent_id", 1),
+                ("is_councilor_execution", 1),
+                ("created_at", -1)
             ])
-            await self.executions_collection.create_index("councilor_id")
-            await self.executions_collection.create_index("started_at")
+            await self.tasks_collection.create_index("severity")
 
             logger.info("✅ Councilor indexes created successfully")
         except Exception as e:
@@ -314,28 +315,16 @@ class CouncilorService:
         self,
         execution: CouncilorExecutionCreate
     ) -> CouncilorExecutionResponse:
-        """Save execution result"""
+        """
+        Save execution result - DEPRECATED
+        This method is kept for backward compatibility but now uses tasks collection
+        """
+        logger.warning("⚠️ save_execution is deprecated. Councilor executions are now saved in tasks collection during agent execution.")
+
         try:
             # Validate councilor exists
             if not await self._agent_exists(execution.councilor_id):
                 raise ValueError(f"Councilor '{execution.councilor_id}' not found")
-
-            # Prepare document
-            execution_doc = {
-                "execution_id": execution.execution_id,
-                "councilor_id": execution.councilor_id,
-                "started_at": execution.started_at,
-                "completed_at": execution.completed_at,
-                "status": execution.status,
-                "severity": execution.severity,
-                "output": execution.output,
-                "error": execution.error,
-                "duration_ms": execution.duration_ms,
-                "created_at": datetime.utcnow()
-            }
-
-            # Insert into database
-            result = await self.executions_collection.insert_one(execution_doc)
 
             # Update agent stats
             await self._update_agent_stats(
@@ -343,14 +332,23 @@ class CouncilorService:
                 execution.severity == "success"
             )
 
-            logger.info(f"✅ Execution saved: {execution.execution_id}")
+            logger.info(f"✅ Stats updated for councilor execution: {execution.execution_id}")
 
-            # Return response
-            execution_doc["_id"] = str(result.inserted_id)
-            return CouncilorExecutionResponse(**execution_doc)
+            # Return a mock response (dados já estão em tasks)
+            return CouncilorExecutionResponse(
+                id=execution.execution_id,
+                execution_id=execution.execution_id,
+                councilor_id=execution.councilor_id,
+                started_at=execution.started_at,
+                completed_at=execution.completed_at,
+                status=execution.status,
+                severity=execution.severity,
+                output=execution.output,
+                error=execution.error,
+                duration_ms=execution.duration_ms,
+                created_at=datetime.utcnow()
+            )
 
-        except DuplicateKeyError:
-            raise ValueError(f"Execution with ID '{execution.execution_id}' already exists")
         except ValueError as e:
             logger.warning(f"⚠️ Validation error saving execution: {e}")
             raise
@@ -363,22 +361,36 @@ class CouncilorService:
         councilor_id: str,
         limit: int = 10
     ) -> ExecutionListResponse:
-        """Get recent executions for a councilor"""
+        """Get recent executions for a councilor from tasks collection"""
         try:
             # Validate councilor exists
             if not await self._agent_exists(councilor_id):
                 raise ValueError(f"Councilor '{councilor_id}' not found")
 
-            # Query executions
-            cursor = self.executions_collection.find(
-                {"councilor_id": councilor_id}
-            ).sort("started_at", -1).limit(limit)
+            # Query executions from tasks collection
+            cursor = self.tasks_collection.find({
+                "agent_id": councilor_id,
+                "is_councilor_execution": True
+            }).sort("created_at", -1).limit(limit)
 
-            executions = await cursor.to_list(length=limit)
+            tasks = await cursor.to_list(length=limit)
 
             execution_responses = []
-            for exec_doc in executions:
-                exec_doc["_id"] = str(exec_doc["_id"])
+            for task in tasks:
+                # Map task fields to execution format
+                exec_doc = {
+                    "_id": str(task["_id"]),
+                    "execution_id": str(task["_id"]),
+                    "councilor_id": task["agent_id"],
+                    "started_at": task.get("created_at"),
+                    "completed_at": task.get("completed_at"),
+                    "status": task.get("status"),
+                    "severity": task.get("severity", "success"),
+                    "output": task.get("result", ""),
+                    "error": task.get("result", "") if task.get("status") == "error" else None,
+                    "duration_ms": int(task.get("duration", 0) * 1000) if task.get("duration") else None,
+                    "created_at": task.get("created_at")
+                }
                 execution_responses.append(CouncilorExecutionResponse(**exec_doc))
 
             return ExecutionListResponse(
@@ -397,22 +409,39 @@ class CouncilorService:
         self,
         councilor_id: str
     ) -> Optional[CouncilorExecutionResponse]:
-        """Get latest execution for a councilor"""
+        """Get latest execution for a councilor from tasks collection"""
         try:
             # Validate councilor exists
             if not await self._agent_exists(councilor_id):
                 raise ValueError(f"Councilor '{councilor_id}' not found")
 
-            # Query latest execution
-            exec_doc = await self.executions_collection.find_one(
-                {"councilor_id": councilor_id},
-                sort=[("started_at", -1)]
+            # Query latest execution from tasks
+            task = await self.tasks_collection.find_one(
+                {
+                    "agent_id": councilor_id,
+                    "is_councilor_execution": True
+                },
+                sort=[("created_at", -1)]
             )
 
-            if not exec_doc:
+            if not task:
                 return None
 
-            exec_doc["_id"] = str(exec_doc["_id"])
+            # Map task to execution format
+            exec_doc = {
+                "_id": str(task["_id"]),
+                "execution_id": str(task["_id"]),
+                "councilor_id": task["agent_id"],
+                "started_at": task.get("created_at"),
+                "completed_at": task.get("completed_at"),
+                "status": task.get("status"),
+                "severity": task.get("severity", "success"),
+                "output": task.get("result", ""),
+                "error": task.get("result", "") if task.get("status") == "error" else None,
+                "duration_ms": int(task.get("duration", 0) * 1000) if task.get("duration") else None,
+                "created_at": task.get("created_at")
+            }
+
             return CouncilorExecutionResponse(**exec_doc)
 
         except ValueError as e:
@@ -471,37 +500,50 @@ class CouncilorService:
     # ========== Helper Methods ==========
 
     async def _update_agent_stats(self, agent_id: str, success: bool):
-        """Update agent execution statistics"""
+        """Update agent execution statistics based on tasks collection"""
         try:
-            agent = await self._get_agent(agent_id)
-            stats = agent.get("stats", {
-                "total_executions": 0,
-                "last_execution": None,
-                "success_rate": 0.0
+            # Calculate stats from tasks collection
+            total = await self.tasks_collection.count_documents({
+                "agent_id": agent_id,
+                "is_councilor_execution": True,
+                "status": {"$in": ["completed", "error"]}
             })
 
-            # Increment total executions
-            total = stats.get("total_executions", 0) + 1
+            if total == 0:
+                logger.debug(f"📊 No completed executions for '{agent_id}'")
+                return
 
-            # Calculate new success rate
-            old_rate = stats.get("success_rate", 0.0)
-            old_successes = int((old_rate / 100.0) * (total - 1)) if total > 1 else 0
-            new_successes = old_successes + (1 if success else 0)
-            new_rate = (new_successes / total) * 100.0
+            # Count successes (severity = success)
+            successes = await self.tasks_collection.count_documents({
+                "agent_id": agent_id,
+                "is_councilor_execution": True,
+                "severity": "success"
+            })
 
-            # Update stats
+            # Calculate success rate
+            success_rate = round((successes / total) * 100, 1) if total > 0 else 0.0
+
+            # Get last execution time
+            last_task = await self.tasks_collection.find_one(
+                {"agent_id": agent_id, "is_councilor_execution": True},
+                sort=[("created_at", -1)]
+            )
+
+            last_execution = last_task.get("created_at") if last_task else None
+
+            # Update agent stats
             await self.agents_collection.update_one(
                 {"agent_id": agent_id},
                 {
                     "$set": {
                         "stats.total_executions": total,
-                        "stats.last_execution": datetime.utcnow(),
-                        "stats.success_rate": round(new_rate, 1)
+                        "stats.last_execution": last_execution,
+                        "stats.success_rate": success_rate
                     }
                 }
             )
 
-            logger.debug(f"📊 Stats updated for '{agent_id}': {total} executions, {new_rate:.1f}% success")
+            logger.debug(f"📊 Stats updated for '{agent_id}': {total} executions, {success_rate:.1f}% success")
 
         except Exception as e:
             logger.warning(f"⚠️ Failed to update stats for '{agent_id}': {e}")

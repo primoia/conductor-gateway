@@ -23,11 +23,13 @@ from src.api.routers.screenplays import init_screenplay_service, router as scree
 from src.api.routers.persona import router as persona_router
 from src.api.routers.persona_version import router as persona_version_router
 from src.api.routers.councilor import router as councilor_router
+from src.api.routers.agents import router as agents_router
 from src.api.models import AgentExecuteRequest
 from src.core.database import init_database, close_database
 from src.clients.conductor_client import ConductorClient
 from src.config.settings import CONDUCTOR_CONFIG, MONGODB_CONFIG, SERVER_CONFIG
 from src.utils.mcp_utils import init_agent
+from src.services.councilor_scheduler import CouncilorBackendScheduler
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +42,9 @@ mongo_db = None
 
 # Conductor API client - will be initialized in lifespan
 conductor_client: ConductorClient | None = None
+
+# Councilor Backend Scheduler - will be initialized in lifespan
+councilor_scheduler: CouncilorBackendScheduler | None = None
 
 
 def mongo_to_dict(item: dict) -> dict:
@@ -191,7 +196,7 @@ async def run_agent_with_queue(job_id: str, payload: dict[str, Any], queue: asyn
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan event handler for FastAPI."""
-    global mongo_client, mongo_db, conductor_client
+    global mongo_client, mongo_db, conductor_client, councilor_scheduler
 
     # Startup
     logger.info("Conductor Gateway API starting up...")
@@ -251,6 +256,21 @@ async def lifespan(app: FastAPI):
     conductor_client = ConductorClient(base_url=conductor_api_url)
     logger.info(f"Initialized ConductorClient with URL: {conductor_api_url}")
 
+    # Initialize and start Councilor Backend Scheduler
+    if mongo_db is not None and conductor_client is not None:
+        try:
+            from motor.motor_asyncio import AsyncIOMotorClient
+            # Create async Motor client for scheduler
+            async_mongo_client = AsyncIOMotorClient(MONGODB_CONFIG["url"])
+            async_mongo_db = async_mongo_client[MONGODB_CONFIG["database"]]
+
+            councilor_scheduler = CouncilorBackendScheduler(async_mongo_db, conductor_client)
+            await councilor_scheduler.start()
+            logger.info("✅ Councilor Backend Scheduler started")
+        except Exception as e:
+            logger.error(f"❌ Failed to start Councilor Scheduler: {e}")
+            councilor_scheduler = None
+
     # Start MCP server in daemon thread
     mcp_thread = threading.Thread(target=start_mcp_server, daemon=True, name="MCP-Server-Thread")
     mcp_thread.start()
@@ -263,6 +283,11 @@ async def lifespan(app: FastAPI):
     # Shutdown
     logger.info("Conductor Gateway API shutting down...")
 
+    # Shutdown Councilor Scheduler
+    if councilor_scheduler:
+        await councilor_scheduler.shutdown()
+        logger.info("Councilor scheduler stopped")
+
     # Close Conductor client
     if conductor_client:
         await conductor_client.close()
@@ -272,7 +297,7 @@ async def lifespan(app: FastAPI):
     if mongo_client:
         mongo_client.close()
         logger.info("MongoDB connection closed")
-    
+
     # Close database connection
     close_database()
     logger.info("Database connection closed")
