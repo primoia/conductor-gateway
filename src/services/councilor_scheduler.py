@@ -9,6 +9,7 @@ Features:
 - No duplicates: Single source of truth
 - Always running: Independent of frontend/browser
 - Scalable: Can run in separate process/container
+- Real-time events: Broadcasts execution events via WebSocket
 """
 
 import logging
@@ -42,13 +43,13 @@ class CouncilorBackendScheduler:
         self.db = db
         self.conductor_client = conductor_client
         self.agents_collection = db.agents
-        self.executions_collection = db.councilor_executions
+        self.tasks_collection = db.tasks  # Use tasks collection instead of councilor_executions
 
         # Configure APScheduler with in-memory job store
         # Note: MongoDB jobstore doesn't work with async objects like ConductorClient
         # Jobs are recreated from MongoDB agents collection on startup, so we don't lose them
         self.scheduler = AsyncIOScheduler(timezone='UTC')
-        logger.info("🏛️ Councilor Backend Scheduler initialized (jobs recreated from MongoDB on startup)")
+        logger.info("🏛️ Councilor Backend Scheduler initialized (uses tasks collection)")
 
     async def start(self):
         """Start the scheduler and load active councilors"""
@@ -198,18 +199,33 @@ class CouncilorBackendScheduler:
         task = config.get("task", {})
         customization = config.get("customization", {})
         display_name = customization.get("display_name", agent_id)
+        task_name = task.get("name", "Unknown Task")
 
         start_time = datetime.utcnow()
-        execution_id = f"exec_{agent_id}_{int(start_time.timestamp())}"
+        # Use milliseconds for unique execution_id to avoid collisions
+        execution_id = f"exec_{agent_id}_{int(start_time.timestamp() * 1000)}"
 
         logger.info(f"🔎 Executing councilor task: {display_name} ({agent_id})")
+
+        # 🔔 Emit "councilor_started" event via WebSocket
+        try:
+            from src.api.websocket import gamification_manager
+            await gamification_manager.broadcast("councilor_started", {
+                "councilor_id": agent_id,
+                "task_name": task_name,
+                "display_name": display_name,
+                "execution_id": execution_id,
+                "started_at": start_time.isoformat()
+            })
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to broadcast councilor_started event: {e}")
 
         try:
             # Execute agent via Conductor API
             result = await self.conductor_client.execute_agent(
                 agent_name=agent_id,
                 prompt=task.get("prompt", "Analyze the project and provide insights"),
-                instance_id=f"councilor_{agent_id}_{int(start_time.timestamp())}",
+                instance_id=f"councilor_{agent_id}_{int(start_time.timestamp() * 1000)}",
                 context_mode="stateless",
                 timeout=600
             )
@@ -221,18 +237,23 @@ class CouncilorBackendScheduler:
             output = result.get("result", "") if isinstance(result, dict) else str(result)
             severity = self._analyze_severity(output)
 
-            # Save execution result to MongoDB
-            await self.executions_collection.insert_one({
-                "execution_id": execution_id,
-                "councilor_id": agent_id,
-                "started_at": start_time,
-                "completed_at": end_time,
-                "duration_ms": duration_ms,
+            # Save execution result to tasks collection
+            await self.tasks_collection.insert_one({
+                "task_id": execution_id,
+                "agent_id": agent_id,
+                "instance_id": f"councilor_{agent_id}_{int(start_time.timestamp() * 1000)}",
+                "is_councilor_execution": True,  # Flag to identify councilor tasks
+                "councilor_config": {
+                    "task_name": task_name,
+                    "display_name": display_name
+                },
                 "status": "completed",
                 "severity": severity,
-                "output": output,
+                "result": output,
                 "error": None,
-                "created_at": datetime.utcnow()
+                "created_at": start_time,
+                "completed_at": end_time,
+                "duration": (end_time - start_time).total_seconds()
             })
 
             # Update agent statistics
@@ -243,26 +264,68 @@ class CouncilorBackendScheduler:
                 f"(severity={severity}, duration={duration_ms}ms)"
             )
 
+            # 🔔 Emit "councilor_completed" event via WebSocket
+            try:
+                from src.api.websocket import gamification_manager
+                await gamification_manager.broadcast("councilor_completed", {
+                    "councilor_id": agent_id,
+                    "task_name": task_name,
+                    "display_name": display_name,
+                    "execution_id": execution_id,
+                    "status": "completed",
+                    "severity": severity,
+                    "started_at": start_time.isoformat(),
+                    "completed_at": end_time.isoformat(),
+                    "duration_ms": duration_ms
+                })
+            except Exception as e:
+                logger.warning(f"⚠️ Failed to broadcast councilor_completed event: {e}")
+
             # TODO: Send notifications based on config.notifications
 
         except Exception as e:
             logger.error(f"❌ Error executing councilor task {agent_id}: {e}", exc_info=True)
 
-            # Save error result
-            await self.executions_collection.insert_one({
-                "execution_id": execution_id,
-                "councilor_id": agent_id,
-                "started_at": start_time,
-                "completed_at": datetime.utcnow(),
+            end_time = datetime.utcnow()
+
+            # Save error result to tasks collection
+            await self.tasks_collection.insert_one({
+                "task_id": execution_id,
+                "agent_id": agent_id,
+                "instance_id": f"councilor_{agent_id}_{int(start_time.timestamp() * 1000)}",
+                "is_councilor_execution": True,  # Flag to identify councilor tasks
+                "councilor_config": {
+                    "task_name": task_name,
+                    "display_name": display_name
+                },
                 "status": "error",
                 "severity": "error",
-                "output": None,
+                "result": None,
                 "error": str(e),
-                "created_at": datetime.utcnow()
+                "created_at": start_time,
+                "completed_at": end_time,
+                "duration": (end_time - start_time).total_seconds()
             })
 
             # Update stats with failure
             await self._update_agent_stats(agent_id, success=False)
+
+            # 🔔 Emit "councilor_error" event via WebSocket
+            try:
+                from src.api.websocket import gamification_manager
+                await gamification_manager.broadcast("councilor_error", {
+                    "councilor_id": agent_id,
+                    "task_name": task_name,
+                    "display_name": display_name,
+                    "execution_id": execution_id,
+                    "status": "error",
+                    "severity": "error",
+                    "error": str(e),
+                    "started_at": start_time.isoformat(),
+                    "completed_at": datetime.utcnow().isoformat()
+                })
+            except Exception as broadcast_err:
+                logger.warning(f"⚠️ Failed to broadcast councilor_error event: {broadcast_err}")
 
     def _analyze_severity(self, output: str) -> str:
         """

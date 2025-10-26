@@ -14,7 +14,7 @@ from datetime import datetime
 from typing import Any
 
 import httpx
-from fastapi import FastAPI, HTTPException, Query, Request, Response
+from fastapi import FastAPI, HTTPException, Query, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pymongo import MongoClient
@@ -25,6 +25,7 @@ from src.api.routers.persona_version import router as persona_version_router
 from src.api.routers.councilor import router as councilor_router
 from src.api.routers.agents import router as agents_router
 from src.api.models import AgentExecuteRequest
+from src.api.websocket import gamification_manager
 from src.core.database import init_database, close_database
 from src.clients.conductor_client import ConductorClient
 from src.config.settings import CONDUCTOR_CONFIG, MONGODB_CONFIG, SERVER_CONFIG
@@ -233,11 +234,23 @@ async def lifespan(app: FastAPI):
         agents_collection.create_index("is_councilor")
         logger.info("Created indexes on agents collection")
 
-        councilor_executions = mongo_db["councilor_executions"]
-        councilor_executions.create_index("execution_id", unique=True)
-        councilor_executions.create_index([("councilor_id", 1), ("started_at", -1)])
-        councilor_executions.create_index("councilor_id")
-        logger.info("Created indexes on councilor_executions collection")
+        # Tasks collection indexes (used for both agent tasks and councilor executions)
+        tasks_collection = mongo_db["tasks"]
+        try:
+            # Try to create unique index on task_id (may fail if duplicates exist)
+            tasks_collection.create_index("task_id", unique=True, sparse=True)
+        except Exception as e:
+            logger.warning(f"⚠️ Could not create unique index on task_id (may have duplicates): {e}")
+            # Create non-unique index as fallback
+            try:
+                tasks_collection.create_index("task_id")
+            except Exception:
+                pass
+
+        tasks_collection.create_index([("agent_id", 1), ("created_at", -1)])
+        tasks_collection.create_index("is_councilor_execution")
+        tasks_collection.create_index([("is_councilor_execution", 1), ("created_at", -1)])
+        logger.info("Created indexes on tasks collection")
 
         # Initialize screenplay service
         init_screenplay_service(mongo_db)
@@ -558,8 +571,83 @@ def create_app() -> FastAPI:
                 "api": f"http://{SERVER_CONFIG['host']}:{SERVER_CONFIG['port']}/api/v1",
                 "mcp": f"http://{SERVER_CONFIG['host']}:{SERVER_CONFIG['mcp_port']}",
                 "health": f"http://{SERVER_CONFIG['host']}:{SERVER_CONFIG['port']}/health",
+                "websocket_gamification": f"ws://{SERVER_CONFIG['host']}:{SERVER_CONFIG['port']}/ws/gamification",
             },
         }
+
+    # WebSocket Endpoints
+
+    @app.websocket("/ws/gamification")
+    async def websocket_gamification_endpoint(websocket: WebSocket):
+        """
+        WebSocket endpoint for real-time gamification events
+
+        Events emitted:
+        - connected: Connection established
+        - councilor_started: Councilor execution started
+        - councilor_completed: Councilor execution completed
+        - councilor_error: Councilor execution failed
+        - agent_metrics_updated: Agent metrics updated
+        - system_alert: System alerts
+
+        Commands accepted:
+        - subscribe: Update event subscriptions
+        - ping: Heartbeat check
+        - get_stats: Get connection statistics
+        """
+        # Generate unique client ID
+        client_id = str(uuid.uuid4())
+
+        try:
+            # Connect client
+            await gamification_manager.connect(websocket, client_id)
+
+            # Send connection success event
+            await gamification_manager.send_to(client_id, "connected", {
+                "message": "Connected to gamification WebSocket",
+                "client_id": client_id
+            })
+
+            # Main message loop
+            while True:
+                # Receive message from client
+                data = await websocket.receive_json()
+
+                # Process client commands
+                command = data.get("command")
+
+                if command == "subscribe":
+                    # Update subscriptions
+                    topics = data.get("topics", ["all"])
+                    gamification_manager.update_subscriptions(client_id, topics)
+                    await gamification_manager.send_to(client_id, "subscribed", {
+                        "topics": topics
+                    })
+                    logger.info(f"Client {client_id} subscribed to: {topics}")
+
+                elif command == "ping":
+                    # Heartbeat response
+                    await gamification_manager.send_to(client_id, "pong", {
+                        "timestamp": time.time()
+                    })
+
+                elif command == "get_stats":
+                    # Send connection statistics
+                    stats = gamification_manager.get_stats()
+                    await gamification_manager.send_to(client_id, "stats", stats)
+
+                else:
+                    # Unknown command
+                    await gamification_manager.send_to(client_id, "error", {
+                        "message": f"Unknown command: {command}"
+                    })
+
+        except WebSocketDisconnect:
+            logger.info(f"Client {client_id} disconnected")
+        except Exception as e:
+            logger.error(f"Error in WebSocket for client {client_id}: {e}", exc_info=True)
+        finally:
+            gamification_manager.disconnect(client_id)
 
     # Agent Management Endpoints
 
@@ -683,6 +771,26 @@ def create_app() -> FastAPI:
             logger.info(f"   - cwd final: {final_cwd}")
             logger.info(f"   - ai_provider: {ai_provider}")
 
+            # 🔔 Emit "agent_execution_started" event via WebSocket
+            start_time = datetime.now()
+            execution_id = f"exec_{actual_agent_id}_{int(start_time.timestamp() * 1000)}"
+            try:
+                agent_definition = agent.get("definition", {}) if isinstance(agent.get("definition"), dict) else {}
+                agent_name = agent_definition.get("name", agent_id)
+                agent_emoji = agent_definition.get("emoji", "🤖")
+
+                await gamification_manager.broadcast("agent_execution_started", {
+                    "agent_id": actual_agent_id,
+                    "agent_name": agent_name,
+                    "agent_emoji": agent_emoji,
+                    "instance_id": instance_id,
+                    "execution_id": execution_id,
+                    "started_at": start_time.isoformat(),
+                    "level": "debug"  # Debug level - execution log
+                })
+            except Exception as e:
+                logger.warning(f"⚠️ Failed to broadcast agent_execution_started event: {e}")
+
             # Execute the agent via Conductor API
             response = await conductor_client.execute_agent(
                 agent_name=agent.get("name") or agent_id,
@@ -694,8 +802,38 @@ def create_app() -> FastAPI:
                 ai_provider=ai_provider,
             )
 
+            end_time = datetime.now()
+            duration_ms = int((end_time - start_time).total_seconds() * 1000)
+
             logger.info(f"✅ [GATEWAY] Resposta recebida do conductor")
             logger.info(f"   - Status: success" if response else "   - Status: error")
+
+            # 🔔 Emit "agent_execution_completed" event via WebSocket
+            try:
+                # Determine status/severity from response
+                status = "completed" if response else "error"
+                severity = "success" if response and response.get("status") != "error" else "error"
+
+                # Extract result summary (first 200 chars of agent response)
+                result_text = response.get("result") or response.get("stdout") or str(response)
+                summary = result_text[:200] if result_text else "Sem resultado"
+
+                await gamification_manager.broadcast("agent_execution_completed", {
+                    "agent_id": actual_agent_id,
+                    "agent_name": agent_name,
+                    "agent_emoji": agent_emoji,
+                    "instance_id": instance_id,
+                    "execution_id": execution_id,
+                    "status": status,
+                    "severity": severity,
+                    "started_at": start_time.isoformat(),
+                    "completed_at": end_time.isoformat(),
+                    "duration_ms": duration_ms,
+                    "level": "result",  # Result level - agent output
+                    "summary": summary  # First 200 chars of result
+                })
+            except Exception as e:
+                logger.warning(f"⚠️ Failed to broadcast agent_execution_completed event: {e}")
 
             # Extract result from response
             result_text = response.get("result") or response.get("stdout") or str(response)

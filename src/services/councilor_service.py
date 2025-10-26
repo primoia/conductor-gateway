@@ -37,9 +37,7 @@ class CouncilorService:
     def __init__(self, db: AsyncIOMotorDatabase):
         self.db = db
         self.agents_collection = db.agents
-        self.tasks_collection = db.tasks  # Usar tasks ao invés de councilor_executions
-        # Manter referência para councilor_executions para migração
-        self.legacy_executions_collection = db.councilor_executions
+        self.tasks_collection = db.tasks  # Use tasks instead of councilor_executions
 
     async def ensure_indexes(self):
         """Create MongoDB indexes for performance"""
