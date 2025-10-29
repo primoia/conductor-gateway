@@ -17,6 +17,8 @@ import httpx
 from fastapi import FastAPI, HTTPException, Query, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
 from pymongo import MongoClient
 
 from src.api.routers.screenplays import init_screenplay_service, router as screenplays_router
@@ -24,6 +26,7 @@ from src.api.routers.persona import router as persona_router
 from src.api.routers.persona_version import router as persona_version_router
 from src.api.routers.councilor import router as councilor_router
 from src.api.routers.agents import router as agents_router
+from src.api.routers.portfolio import router as portfolio_router, limiter
 from src.api.models import AgentExecuteRequest
 from src.api.websocket import gamification_manager
 from src.core.database import init_database, close_database
@@ -329,20 +332,35 @@ def create_app() -> FastAPI:
         redoc_url="/redoc",
     )
 
-    # Add CORS middleware
+    # Add CORS middleware with specific origins for portfolio
+    allowed_origins = [
+        "http://localhost:4321",  # Astro dev server
+        "https://cezarfuhr.primoia.dev",  # Production portfolio domain
+        "http://localhost:3000",  # Additional dev server (if needed)
+    ]
+
+    # In development, also allow wildcard (can be restricted via env var in production)
+    if SERVER_CONFIG.get("environment", "development") == "development":
+        allowed_origins.append("*")
+
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],  # Em produção, especificar domínios específicos
+        allow_origins=allowed_origins,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    # Add rate limiter state and exception handler
+    app.state.limiter = limiter
+    app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
     # Include routers
     app.include_router(screenplays_router)
     app.include_router(persona_router)
     app.include_router(persona_version_router)
     app.include_router(councilor_router)
+    app.include_router(portfolio_router)
 
     # SSE Streaming Endpoints - Following Plan2 Hybrid REST + EventSource pattern
 
