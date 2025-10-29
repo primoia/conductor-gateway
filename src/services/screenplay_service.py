@@ -37,9 +37,19 @@ class ScreenplayService:
     def _ensure_indexes(self):
         """Create necessary indexes for the screenplays collection."""
         try:
-            # Unique index on name (case-sensitive)
-            self.collection.create_index("name", unique=True)
-            logger.info("Created unique index on screenplays.name")
+            # Ensure 'name' is NOT unique (we allow duplicate names)
+            # Drop legacy unique index on name if it exists
+            try:
+                indexes = self.collection.index_information()
+                for idx_name, idx_info in indexes.items():
+                    if idx_info.get('key') == [('name', 1)] and idx_info.get('unique'):
+                        self.collection.drop_index(idx_name)
+                        logger.info("Dropped legacy unique index on screenplays.name")
+            except Exception as e:
+                logger.warning(f"Could not inspect/drop legacy name index: {e}")
+            # Keep a regular index on name for performance (non-unique)
+            self.collection.create_index("name")
+            logger.info("Ensured non-unique index on screenplays.name")
 
             # Index for soft delete queries
             self.collection.create_index("isDeleted")
@@ -51,18 +61,34 @@ class ScreenplayService:
             )
             logger.info("Created text index on screenplays for search")
 
-            # Index for file path queries
-            self.collection.create_index("filePath")
-            logger.info("Created index on screenplays.filePath")
+            # Unique partial index on filePath for active (non-deleted) docs
+            self.collection.create_index(
+                [("filePath", 1)],
+                name="uniq_active_filePath",
+                unique=True,
+                partialFilterExpression={"filePath": {"$exists": True, "$ne": None}, "isDeleted": False},
+            )
+            logger.info("Ensured unique partial index on screenplays.filePath (active only)")
             
-            # Index for import/export paths
-            self.collection.create_index("importPath")
+            # Unique partial index on importPath for active (non-deleted) docs
+            self.collection.create_index(
+                [("importPath", 1)],
+                name="uniq_active_importPath",
+                unique=True,
+                partialFilterExpression={"importPath": {"$exists": True, "$ne": None}, "isDeleted": False},
+            )
+            # Regular index on exportPath
             self.collection.create_index("exportPath")
-            logger.info("Created indexes on screenplays.importPath and exportPath")
+            logger.info("Ensured unique index on importPath (active) and index on exportPath")
             
-            # Index for file key (duplicate detection)
-            self.collection.create_index("fileKey")
-            logger.info("Created index on screenplays.fileKey")
+            # Unique partial index on fileKey for active docs
+            self.collection.create_index(
+                [("fileKey", 1)],
+                name="uniq_active_fileKey",
+                unique=True,
+                partialFilterExpression={"fileKey": {"$exists": True, "$ne": None}, "isDeleted": False},
+            )
+            logger.info("Ensured unique partial index on screenplays.fileKey (active only)")
             
             # Index for content hash (duplicate detection)
             self.collection.create_index("contentHash")
@@ -118,12 +144,27 @@ class ScreenplayService:
         else:
             content = "# Novo Roteiro\n\nComece a escrever seu roteiro aqui..."
 
-        # Generate file key for duplicate detection
+        # Enforce uniqueness by path (prefer import_path; fallback to file_path)
+        from src.utils.duplicate_detector import extract_file_name_from_path
+
+        if import_path:
+            duplicate = self.check_duplicate_by_path(import_path, extract_file_name_from_path(import_path))
+            if duplicate:
+                raise ValueError(f"Screenplay for path '{import_path}' already exists")
+
+        if file_path:
+            duplicate = self.check_duplicate_by_path(file_path, extract_file_name_from_path(file_path))
+            if duplicate:
+                raise ValueError(f"Screenplay for path '{file_path}' already exists")
+
+        # Generate file key for duplicate detection (prefer path provided)
         file_key = None
         if file_path:
-            from src.utils.duplicate_detector import extract_file_name_from_path
             file_name = extract_file_name_from_path(file_path)
             file_key = generate_file_key(file_path, file_name)
+        elif import_path:
+            file_name = extract_file_name_from_path(import_path)
+            file_key = generate_file_key(import_path, file_name)
 
         now = datetime.now(UTC)
         document = {
@@ -146,9 +187,16 @@ class ScreenplayService:
             document["_id"] = result.inserted_id
             logger.info(f"Created screenplay: {name} (id: {result.inserted_id})")
             return document
-        except DuplicateKeyError:
-            logger.error(f"Screenplay with name '{name}' already exists")
-            raise ValueError(f"Screenplay with name '{name}' already exists")
+        except DuplicateKeyError as e:
+            msg = str(e)
+            logger.error(f"Duplicate key error on screenplay create: {msg}")
+            if "uniq_active_importPath" in msg or "importPath" in msg:
+                raise ValueError(f"Screenplay for path '{import_path}' already exists")
+            if "uniq_active_filePath" in msg or "filePath" in msg:
+                raise ValueError(f"Screenplay for path '{file_path}' already exists")
+            if "uniq_active_fileKey" in msg or "fileKey" in msg:
+                raise ValueError("A screenplay for this file already exists")
+            raise ValueError("Duplicate detected while creating screenplay")
 
     def validate_markdown_content(self, content: str) -> dict:
         """
@@ -348,15 +396,8 @@ class ScreenplayService:
         update_doc = {"$set": {"updatedAt": datetime.now(UTC)}, "$inc": {"version": 1}}
 
         if name is not None:
-            # Validate name using middleware
+            # Validate name using middleware (duplicates allowed)
             name = ValidationMiddleware.validate_screenplay_name(name)
-            
-            # Check for name conflicts
-            if name != existing.get("name"):
-                conflict = self.collection.find_one({"name": name})
-                if conflict:
-                    logger.error(f"Name conflict during update: {name}")
-                    raise ValueError(f"Screenplay with name '{name}' already exists")
             update_doc["$set"]["name"] = name
 
         if description is not None:
@@ -383,14 +424,27 @@ class ScreenplayService:
             )
             
             if validated_file_path is not None:
+                # Check duplicate by file path (exclude current doc)
+                from src.utils.duplicate_detector import extract_file_name_from_path
+                duplicate = self.check_duplicate_by_path(validated_file_path, extract_file_name_from_path(validated_file_path), exclude_id=screenplay_id)
+                if duplicate:
+                    raise ValueError(f"Screenplay for path '{validated_file_path}' already exists")
                 update_doc["$set"]["filePath"] = validated_file_path
                 # Update file key for duplicate detection
-                from src.utils.duplicate_detector import extract_file_name_from_path
                 file_name = extract_file_name_from_path(validated_file_path)
                 update_doc["$set"]["fileKey"] = generate_file_key(validated_file_path, file_name)
             
             if validated_import_path is not None:
+                # Check duplicate by import path (exclude current doc)
+                from src.utils.duplicate_detector import extract_file_name_from_path
+                duplicate = self.check_duplicate_by_path(validated_import_path, extract_file_name_from_path(validated_import_path), exclude_id=screenplay_id)
+                if duplicate:
+                    raise ValueError(f"Screenplay for path '{validated_import_path}' already exists")
                 update_doc["$set"]["importPath"] = validated_import_path
+                # Also set fileKey if filePath not provided
+                if "filePath" not in update_doc["$set"] and not existing.get("filePath"):
+                    file_name = extract_file_name_from_path(validated_import_path)
+                    update_doc["$set"]["fileKey"] = generate_file_key(validated_import_path, file_name)
             
             if validated_export_path is not None:
                 update_doc["$set"]["exportPath"] = validated_export_path
@@ -449,15 +503,8 @@ class ScreenplayService:
             logger.warning(f"Screenplay not found for rename: {screenplay_id}")
             return None
 
-        # Validate new name using middleware
+        # Validate new name using middleware (duplicates allowed)
         new_name = ValidationMiddleware.validate_screenplay_name(new_name)
-        
-        # Check for name conflicts
-        if new_name != existing.get("name"):
-            conflict = self.collection.find_one({"name": new_name, "isDeleted": False})
-            if conflict:
-                logger.error(f"Name conflict during rename: {new_name}")
-                raise ValueError(f"Screenplay with name '{new_name}' already exists")
 
         # Build update document
         update_doc = {
@@ -485,6 +532,10 @@ class ScreenplayService:
                 new_file_path = sanitize_file_path(new_file_path)
                 
                 if new_file_path and validate_file_path(new_file_path):
+                    # Ensure no duplicate path (exclude current doc)
+                    duplicate = self.check_duplicate_by_path(new_file_path, extract_file_name_from_path(new_file_path), exclude_id=screenplay_id)
+                    if duplicate:
+                        raise ValueError(f"Screenplay for path '{new_file_path}' already exists")
                     update_doc["$set"]["filePath"] = new_file_path
                     # Update file key
                     file_name = extract_file_name_from_path(new_file_path)

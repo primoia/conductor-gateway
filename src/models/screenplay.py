@@ -6,6 +6,8 @@ from datetime import datetime
 from typing import Optional
 
 from pydantic import BaseModel, ConfigDict, Field
+from pydantic.alias_generators import to_camel
+from pydantic.fields import AliasChoices
 
 
 class MarkdownValidationRequest(BaseModel):
@@ -52,12 +54,37 @@ class ScreenplayCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=200, description="Unique screenplay name")
     description: Optional[str] = Field(None, max_length=500, description="Screenplay description")
     tags: list[str] = Field(default_factory=list, description="Tags for search and categorization")
-    working_directory: Optional[str] = Field(None, max_length=1000, description="Default working directory for agents in this screenplay")
-    file_path: Optional[str] = Field(None, max_length=500, description="Full path to the markdown file on disk")
-    import_path: Optional[str] = Field(None, max_length=500, description="Path from which the screenplay was imported")
-    export_path: Optional[str] = Field(None, max_length=500, description="Last path where the screenplay was exported")
+    working_directory: Optional[str] = Field(
+        None,
+        max_length=1000,
+        description="Default working directory for agents in this screenplay",
+        alias="workingDirectory",
+        validation_alias=AliasChoices("workingDirectory", "working_directory"),
+    )
+    file_path: Optional[str] = Field(
+        None,
+        max_length=500,
+        description="Full path to the markdown file on disk",
+        alias="filePath",
+        validation_alias=AliasChoices("filePath", "file_path"),
+    )
+    import_path: Optional[str] = Field(
+        None,
+        max_length=500,
+        description="Path from which the screenplay was imported",
+        alias="importPath",
+        validation_alias=AliasChoices("importPath", "import_path"),
+    )
+    export_path: Optional[str] = Field(
+        None,
+        max_length=500,
+        description="Last path where the screenplay was exported",
+        alias="exportPath",
+        validation_alias=AliasChoices("exportPath", "export_path"),
+    )
 
     model_config = ConfigDict(
+        populate_by_name=True,
         json_schema_extra={
             "example": {
                 "name": "My First Screenplay",
@@ -78,13 +105,38 @@ class ScreenplayUpdate(BaseModel):
     description: Optional[str] = Field(None, max_length=500, description="Screenplay description")
     tags: Optional[list[str]] = Field(None, description="Tags for search and categorization")
     content: Optional[str] = Field(None, description="Markdown content of the screenplay")
-    working_directory: Optional[str] = Field(None, max_length=1000, description="Default working directory for agents in this screenplay")
-    file_path: Optional[str] = Field(None, max_length=500, description="Full path to the markdown file on disk")
-    import_path: Optional[str] = Field(None, max_length=500, description="Path from which the screenplay was imported")
-    export_path: Optional[str] = Field(None, max_length=500, description="Last path where the screenplay was exported")
+    working_directory: Optional[str] = Field(
+        None,
+        max_length=1000,
+        description="Default working directory for agents in this screenplay",
+        alias="workingDirectory",
+        validation_alias=AliasChoices("workingDirectory", "working_directory"),
+    )
+    file_path: Optional[str] = Field(
+        None,
+        max_length=500,
+        description="Full path to the markdown file on disk",
+        alias="filePath",
+        validation_alias=AliasChoices("filePath", "file_path"),
+    )
+    import_path: Optional[str] = Field(
+        None,
+        max_length=500,
+        description="Path from which the screenplay was imported",
+        alias="importPath",
+        validation_alias=AliasChoices("importPath", "import_path"),
+    )
+    export_path: Optional[str] = Field(
+        None,
+        max_length=500,
+        description="Last path where the screenplay was exported",
+        alias="exportPath",
+        validation_alias=AliasChoices("exportPath", "export_path"),
+    )
     is_deleted: Optional[bool] = Field(None, alias="isDeleted", description="Soft delete flag")
 
     model_config = ConfigDict(
+        populate_by_name=True,
         json_schema_extra={
             "example": {
                 "name": "Updated Screenplay Name",
@@ -109,10 +161,10 @@ class ScreenplayResponse(BaseModel):
     tags: list[str] = Field(default_factory=list, description="Tags")
     content: str = Field(..., description="Markdown content")
     working_directory: Optional[str] = Field(None, alias="workingDirectory", description="Default working directory for agents in this screenplay")
-    file_path: Optional[str] = Field(None, description="Full path to the markdown file on disk")
-    import_path: Optional[str] = Field(None, description="Path from which the screenplay was imported")
-    export_path: Optional[str] = Field(None, description="Last path where the screenplay was exported")
-    file_key: Optional[str] = Field(None, description="Unique key for duplicate detection")
+    file_path: Optional[str] = Field(None, alias="filePath", description="Full path to the markdown file on disk")
+    import_path: Optional[str] = Field(None, alias="importPath", description="Path from which the screenplay was imported")
+    export_path: Optional[str] = Field(None, alias="exportPath", description="Last path where the screenplay was exported")
+    file_key: Optional[str] = Field(None, alias="fileKey", description="Unique key for duplicate detection")
     is_deleted: bool = Field(False, alias="isDeleted", description="Soft delete flag")
     version: int = Field(1, description="Version number")
     created_at: datetime = Field(..., alias="createdAt", description="Creation timestamp")
@@ -127,10 +179,10 @@ class ScreenplayResponse(BaseModel):
                 "description": "A sample screenplay",
                 "tags": ["sample", "tutorial"],
                 "content": "# Sample Screenplay\n\nThis is the content.",
-                "file_path": "/path/to/sample_screenplay.md",
-                "import_path": "/imports/sample_screenplay.md",
-                "export_path": "/exports/sample_screenplay.md",
-                "file_key": "sample_screenplay_key_123",
+                "filePath": "/path/to/sample_screenplay.md",
+                "importPath": "/imports/sample_screenplay.md",
+                "exportPath": "/exports/sample_screenplay.md",
+                "fileKey": "sample_screenplay_key_123",
                 "isDeleted": False,
                 "version": 1,
                 "createdAt": "2025-01-15T10:30:00Z",
@@ -148,10 +200,10 @@ class ScreenplayListItem(BaseModel):
     description: Optional[str] = Field(None, description="Screenplay description")
     tags: list[str] = Field(default_factory=list, description="Tags")
     working_directory: Optional[str] = Field(None, alias="workingDirectory", description="Default working directory for agents in this screenplay")
-    file_path: Optional[str] = Field(None, description="Full path to the markdown file on disk")
-    import_path: Optional[str] = Field(None, description="Path from which the screenplay was imported")
-    export_path: Optional[str] = Field(None, description="Last path where the screenplay was exported")
-    file_key: Optional[str] = Field(None, description="Unique key for duplicate detection")
+    file_path: Optional[str] = Field(None, alias="filePath", description="Full path to the markdown file on disk")
+    import_path: Optional[str] = Field(None, alias="importPath", description="Path from which the screenplay was imported")
+    export_path: Optional[str] = Field(None, alias="exportPath", description="Last path where the screenplay was exported")
+    file_key: Optional[str] = Field(None, alias="fileKey", description="Unique key for duplicate detection")
     is_deleted: bool = Field(False, alias="isDeleted", description="Soft delete flag")
     version: int = Field(1, description="Version number")
     created_at: datetime = Field(..., alias="createdAt", description="Creation timestamp")
