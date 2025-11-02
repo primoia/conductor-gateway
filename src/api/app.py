@@ -27,6 +27,7 @@ from src.api.routers.persona_version import router as persona_version_router
 from src.api.routers.councilor import router as councilor_router
 from src.api.routers.agents import router as agents_router
 from src.api.routers.portfolio import router as portfolio_router, limiter
+from src.api.routers.conversations import router as conversations_router  # 🔥 NOVO: Rotas de conversas
 from src.api.models import AgentExecuteRequest
 from src.api.websocket import gamification_manager
 from src.core.database import init_database, close_database
@@ -361,6 +362,7 @@ def create_app() -> FastAPI:
     app.include_router(persona_version_router)
     app.include_router(councilor_router)
     app.include_router(portfolio_router)
+    app.include_router(conversations_router)  # 🔥 NOVO: Proxy para conversas globais
 
     # SSE Streaming Endpoints - Following Plan2 Hybrid REST + EventSource pattern
 
