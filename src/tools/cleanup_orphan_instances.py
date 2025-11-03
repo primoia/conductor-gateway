@@ -48,7 +48,7 @@ def cleanup_orphan_instances(dry_run=True):
 
     # Get all screenplay IDs
     valid_screenplay_ids = set()
-    for screenplay in screenplays.find({}, {'id': 1, '_id': 0}):
+    for screenplay in screenplays.find({"isDeleted": {"$ne": True}}, {'id': 1, '_id': 0}):
         valid_screenplay_ids.add(screenplay.get('id'))
 
     print(f"📄 Total de screenplays válidos: {len(valid_screenplay_ids)}")
