@@ -1476,25 +1476,45 @@ def create_app() -> FastAPI:
             if not hard:
                 logger.info(f"Soft deleting instance {instance_id} (setting isDeleted=true)")
 
+                deletion_timestamp = datetime.now().isoformat()
+
+                # 1. Marcar a instância como deletada
                 result = agent_instances.update_one(
                     {"instance_id": instance_id},
                     {
                         "$set": {
                             "isDeleted": True,
-                            "deleted_at": datetime.now().isoformat(),
-                            "updated_at": datetime.now().isoformat()
+                            "deleted_at": deletion_timestamp,
+                            "updated_at": deletion_timestamp
                         }
                     }
                 )
 
-                logger.info(f"Successfully soft deleted instance {instance_id}")
+                # 2. Propagar soft-delete para mensagens de histórico
+                history_collection = mongo_db["history"]
+                history_result = history_collection.update_many(
+                    {"instance_id": instance_id},
+                    {
+                        "$set": {
+                            "isDeleted": True,
+                            "deleted_at": deletion_timestamp
+                        }
+                    }
+                )
+
+                history_count = history_result.modified_count
+                logger.info(
+                    f"Successfully soft deleted instance {instance_id} "
+                    f"and {history_count} history messages"
+                )
 
                 return {
                     "success": True,
                     "message": "Instance soft deleted successfully (marked as deleted)",
                     "instance_id": instance_id,
                     "deletion_type": "soft",
-                    "isDeleted": True
+                    "isDeleted": True,
+                    "history_messages_affected": history_count
                 }
 
             # HARD DELETE (permanent removal)

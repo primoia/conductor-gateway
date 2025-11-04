@@ -9,7 +9,7 @@ Data: 2025-11-01
 
 import logging
 import httpx
-from fastapi import APIRouter, HTTPException, Request, Response, Path, Query
+from fastapi import APIRouter, HTTPException, Request, Response, Path, Query, UploadFile, File
 from typing import Optional
 
 from src.config.settings import CONDUCTOR_CONFIG
@@ -136,3 +136,86 @@ async def get_conversation_messages(
 ):
     """Proxy: Obter mensagens da conversa."""
     return await proxy_request("GET", f"/conversations/{conversation_id}/messages", request)
+
+
+@router.patch("/{conversation_id}/title")
+async def update_conversation_title(
+    conversation_id: str = Path(...),
+    request: Request = None
+):
+    """Proxy: Atualizar título da conversa."""
+    return await proxy_request("PATCH", f"/conversations/{conversation_id}/title", request)
+
+
+@router.patch("/{conversation_id}/context")
+async def update_conversation_context(
+    conversation_id: str = Path(...),
+    request: Request = None
+):
+    """Proxy: Atualizar contexto da conversa."""
+    return await proxy_request("PATCH", f"/conversations/{conversation_id}/context", request)
+
+
+@router.post("/{conversation_id}/context/upload")
+async def upload_context_file(
+    conversation_id: str = Path(..., description="ID da conversa"),
+    file: UploadFile = File(..., description="Arquivo markdown (.md)")
+):
+    """
+    Upload de arquivo markdown para definir o contexto da conversa.
+
+    Args:
+        conversation_id: ID da conversa
+        file: Arquivo .md com o contexto
+
+    Returns:
+        Confirmação de sucesso e preview do contexto
+    """
+    try:
+        # Validar extensão do arquivo
+        if not file.filename.endswith('.md'):
+            raise HTTPException(
+                status_code=400,
+                detail="Apenas arquivos .md são permitidos"
+            )
+
+        # Ler conteúdo do arquivo
+        content = await file.read()
+        markdown_content = content.decode('utf-8')
+
+        # Validar tamanho (máximo 50KB para o contexto)
+        MAX_CONTEXT_SIZE = 50 * 1024  # 50KB
+        if len(markdown_content) > MAX_CONTEXT_SIZE:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Arquivo muito grande. Máximo: {MAX_CONTEXT_SIZE / 1024}KB"
+            )
+
+        # Enviar para o conductor backend
+        url = f"{CONDUCTOR_URL}/conversations/{conversation_id}/context"
+
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.patch(
+                url,
+                json={"context": markdown_content}
+            )
+
+            if response.status_code != 200:
+                raise HTTPException(
+                    status_code=response.status_code,
+                    detail=f"Erro ao atualizar contexto: {response.text}"
+                )
+
+            return {
+                "success": True,
+                "message": "Contexto carregado com sucesso",
+                "filename": file.filename,
+                "size": len(markdown_content),
+                "preview": markdown_content[:200] + ("..." if len(markdown_content) > 200 else "")
+            }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Erro ao fazer upload de contexto: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Erro ao processar arquivo: {str(e)}")
