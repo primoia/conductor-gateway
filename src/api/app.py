@@ -914,9 +914,10 @@ def create_app() -> FastAPI:
         - instance_id: Unique identifier (format: instance-{timestamp}-{random})
         - agent_id: Agent identifier (foreign key to agents collection)
         - position: {"x": float, "y": float}
+        - screenplay_id: Screenplay identifier for context association (required)
+        - conversation_id: Conversation identifier for context association (required)
 
         Optional fields:
-        - screenplay_id: Screenplay identifier for context association
         - cwd: Current working directory
         - status: Initial status (default: "pending")
         - config: Configuration object
@@ -928,15 +929,15 @@ def create_app() -> FastAPI:
 
         try:
             # Validate required fields
-            required_fields = ["instance_id", "agent_id", "position"]
-            missing_fields = [field for field in required_fields if field not in payload]
+            required_fields = ["instance_id", "agent_id", "position", "screenplay_id", "conversation_id"]
+            missing_fields = [field for field in required_fields if field not in payload or not payload[field]]
 
             if missing_fields:
                 raise HTTPException(
                     status_code=400,
                     detail={
                         "success": False,
-                        "error": f"Missing required fields: {', '.join(missing_fields)}",
+                        "error": f"Missing required fields: {', '.join(missing_fields)}. Um agente só pode ser instanciado se tiver screenplay_id e conversation_id setados.",
                         "required_fields": required_fields
                     }
                 )
@@ -989,16 +990,21 @@ def create_app() -> FastAPI:
                 "last_execution": None
             }
 
-            # Add screenplay_id if provided
+            # Add screenplay_id (now required)
             screenplay_id = payload.get("screenplay_id")
             logger.info(f"🔍 [DEBUG] Processando screenplay_id:")
             logger.info(f"   - screenplay_id extraído: {screenplay_id}")
             logger.info(f"   - screenplay_id é truthy: {bool(screenplay_id)}")
-            if screenplay_id:
-                insert_doc["screenplay_id"] = screenplay_id
-                logger.info(f"   - ✅ screenplay_id adicionado ao insert_doc: {screenplay_id}")
-            else:
-                logger.warning(f"   - ❌ screenplay_id não foi adicionado (valor: {screenplay_id})")
+            insert_doc["screenplay_id"] = screenplay_id
+            logger.info(f"   - ✅ screenplay_id adicionado ao insert_doc: {screenplay_id}")
+
+            # Add conversation_id (now required)
+            conversation_id = payload.get("conversation_id")
+            logger.info(f"🔍 [DEBUG] Processando conversation_id:")
+            logger.info(f"   - conversation_id extraído: {conversation_id}")
+            logger.info(f"   - conversation_id é truthy: {bool(conversation_id)}")
+            insert_doc["conversation_id"] = conversation_id
+            logger.info(f"   - ✅ conversation_id adicionado ao insert_doc: {conversation_id}")
 
             # Add optional fields if provided
             # CWD: Try to inherit from screenplay if not provided
@@ -1025,6 +1031,8 @@ def create_app() -> FastAPI:
                 insert_doc["emoji"] = payload["emoji"]
             if "definition" in payload:
                 insert_doc["definition"] = payload["definition"]
+            if "display_order" in payload:
+                insert_doc["display_order"] = payload["display_order"]
 
             # Insert into MongoDB
             logger.info(f"🔍 [DEBUG] Documento final a ser inserido no MongoDB:")
@@ -1328,6 +1336,78 @@ def create_app() -> FastAPI:
             raise
         except Exception as e:
             logger.error(f"Error getting instance {instance_id}: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.patch("/api/agents/instances/reorder")
+    async def reorder_agent_instances(payload: dict[str, Any]):
+        """
+        🔥 NOVO: Atualiza a ordem de exibição dos agentes no dock.
+
+        Permite que o usuário reordene agentes via drag & drop,
+        persistindo a ordem customizada no MongoDB.
+
+        Request body:
+        {
+            "order_updates": [
+                {"instance_id": "instance-xxx", "display_order": 0},
+                {"instance_id": "instance-yyy", "display_order": 1},
+                ...
+            ]
+        }
+
+        Returns:
+            Confirmação de sucesso com número de agentes atualizados
+        """
+        if mongo_db is None:
+            raise HTTPException(status_code=503, detail="MongoDB connection not available")
+
+        try:
+            order_updates = payload.get("order_updates", [])
+
+            if not order_updates or not isinstance(order_updates, list):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Campo 'order_updates' é obrigatório e deve ser uma lista"
+                )
+
+            logger.info(f"🔄 [REORDER] Atualizando ordem de {len(order_updates)} agentes")
+
+            agent_instances = mongo_db["agent_instances"]
+            updated_count = 0
+
+            for update in order_updates:
+                instance_id = update.get("instance_id")
+                display_order = update.get("display_order")
+
+                if not instance_id or display_order is None:
+                    logger.warning(f"⚠️ [REORDER] Update inválido ignorado: {update}")
+                    continue
+
+                result = agent_instances.update_one(
+                    {"instance_id": instance_id},
+                    {
+                        "$set": {
+                            "display_order": display_order,
+                            "updated_at": datetime.now().isoformat()
+                        }
+                    }
+                )
+
+                if result.matched_count > 0:
+                    updated_count += 1
+
+            logger.info(f"✅ [REORDER] Ordem atualizada para {updated_count}/{len(order_updates)} agentes")
+
+            return {
+                "success": True,
+                "message": f"Ordem atualizada para {updated_count} agentes",
+                "updated_count": updated_count
+            }
+
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"❌ [REORDER] Erro ao atualizar ordem dos agentes: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail=str(e))
 
     @app.patch("/api/agents/instances/{instance_id}")
