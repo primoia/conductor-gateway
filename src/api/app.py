@@ -1772,6 +1772,154 @@ def create_app() -> FastAPI:
             logger.error(f"Error listing processing tasks: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail=str(e))
 
+    @app.get("/api/tasks/events")
+    async def list_tasks_as_events(
+        limit: int = Query(50, ge=1, le=200, description="Maximum number of events to return (default: 50, max: 200)"),
+        include_councilors: bool = Query(True, description="Include councilor executions (default: true)"),
+        include_regular: bool = Query(True, description="Include regular agent executions (default: true)")
+    ):
+        """
+        List recent tasks formatted as gamification events for the frontend.
+
+        This endpoint transforms MongoDB task documents into the same event format
+        used by WebSocket real-time events, enabling historical event loading after page reloads.
+
+        Query parameters:
+        - limit: Maximum number of events (default: 50, max: 200)
+        - include_councilors: Include councilor executions (default: true)
+        - include_regular: Include regular agent executions (default: true)
+
+        Returns:
+        - success: Boolean indicating success
+        - count: Number of events returned
+        - events: Array of gamification events with format:
+          {
+            "type": "agent_execution_completed" | "agent_execution_error",
+            "data": {
+              "execution_id": str,
+              "agent_id": str,
+              "agent_name": str,
+              "agent_emoji": str,
+              "status": str,
+              "severity": str,
+              "summary": str,
+              "duration_ms": int,
+              "completed_at": str,
+              "is_councilor": bool,
+              "level": "result" | "debug"
+            },
+            "timestamp": int (milliseconds)
+          }
+        """
+        if mongo_db is None:
+            raise HTTPException(status_code=503, detail="MongoDB connection not available")
+
+        try:
+            tasks_collection = mongo_db["tasks"]
+            agents_collection = mongo_db["agents"]
+
+            # Build query filter
+            query_filter = {"status": {"$in": ["completed", "error"]}}
+
+            # Filter by execution type
+            councilor_filters = []
+            if include_councilors:
+                councilor_filters.append({"is_councilor_execution": True})
+            if include_regular:
+                councilor_filters.append({"is_councilor_execution": {"$ne": True}})
+
+            if councilor_filters:
+                if len(councilor_filters) == 1:
+                    query_filter.update(councilor_filters[0])
+                else:
+                    query_filter["$or"] = councilor_filters
+
+            logger.info(f"Listing tasks as events with filter: {query_filter}, limit={limit}")
+
+            # Query MongoDB sorted by completed_at descending (most recent first)
+            cursor = tasks_collection.find(query_filter)
+            cursor = cursor.sort("completed_at", -1).limit(limit)
+
+            # Build agent cache to avoid repeated lookups
+            agent_cache = {}
+
+            events = []
+            for task_doc in cursor:
+                agent_id = task_doc.get("agent_id", "unknown")
+
+                # Get agent metadata (cached)
+                if agent_id not in agent_cache:
+                    agent = agents_collection.find_one({"agent_id": agent_id})
+                    if agent:
+                        definition = agent.get("definition", {})
+                        agent_cache[agent_id] = {
+                            "name": definition.get("name", agent_id),
+                            "emoji": definition.get("emoji", "🤖")
+                        }
+                    else:
+                        agent_cache[agent_id] = {
+                            "name": agent_id,
+                            "emoji": "🤖"
+                        }
+
+                agent_meta = agent_cache[agent_id]
+
+                # Determine event type
+                status = task_doc.get("status", "completed")
+                event_type = "agent_execution_error" if status == "error" else "agent_execution_completed"
+
+                # Extract task data
+                task_id = task_doc.get("task_id", "")
+                severity = task_doc.get("severity", "success")
+                result = task_doc.get("result", "")
+                duration = task_doc.get("duration", 0)
+                completed_at = task_doc.get("completed_at")
+                is_councilor = task_doc.get("is_councilor_execution", False)
+
+                # Generate summary
+                summary = result[:200] if result else "Execução concluída"
+                if len(result) > 200:
+                    summary += "..."
+
+                # Determine level (result for councilors/errors, debug for regular executions)
+                level = "result" if is_councilor or status == "error" else "debug"
+
+                # Convert timestamp to milliseconds
+                timestamp_ms = int(completed_at.timestamp() * 1000) if completed_at else 0
+
+                # Build event in same format as WebSocket
+                event = {
+                    "type": event_type,
+                    "data": {
+                        "execution_id": task_id,
+                        "agent_id": agent_id,
+                        "agent_name": agent_meta["name"],
+                        "agent_emoji": agent_meta["emoji"],
+                        "status": status,
+                        "severity": severity,
+                        "summary": summary,
+                        "duration_ms": int(duration * 1000),
+                        "completed_at": completed_at.isoformat() if completed_at else None,
+                        "is_councilor": is_councilor,
+                        "level": level
+                    },
+                    "timestamp": timestamp_ms
+                }
+
+                events.append(event)
+
+            logger.info(f"Retrieved {len(events)} tasks as events")
+
+            return {
+                "success": True,
+                "count": len(events),
+                "events": events
+            }
+
+        except Exception as e:
+            logger.error(f"Error listing tasks as events: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail=str(e))
+
     @app.get("/api/agents/context/{instance_id}")
     async def get_agent_context(instance_id: str):
         """Get full context (persona, procedure, history) for a specific agent instance."""
