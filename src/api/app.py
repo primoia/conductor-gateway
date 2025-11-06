@@ -914,9 +914,10 @@ def create_app() -> FastAPI:
         - instance_id: Unique identifier (format: instance-{timestamp}-{random})
         - agent_id: Agent identifier (foreign key to agents collection)
         - position: {"x": float, "y": float}
+        - screenplay_id: Screenplay identifier for context association (required)
+        - conversation_id: Conversation identifier for context association (required)
 
         Optional fields:
-        - screenplay_id: Screenplay identifier for context association
         - cwd: Current working directory
         - status: Initial status (default: "pending")
         - config: Configuration object
@@ -928,15 +929,15 @@ def create_app() -> FastAPI:
 
         try:
             # Validate required fields
-            required_fields = ["instance_id", "agent_id", "position"]
-            missing_fields = [field for field in required_fields if field not in payload]
+            required_fields = ["instance_id", "agent_id", "position", "screenplay_id", "conversation_id"]
+            missing_fields = [field for field in required_fields if field not in payload or not payload[field]]
 
             if missing_fields:
                 raise HTTPException(
                     status_code=400,
                     detail={
                         "success": False,
-                        "error": f"Missing required fields: {', '.join(missing_fields)}",
+                        "error": f"Missing required fields: {', '.join(missing_fields)}. Um agente só pode ser instanciado se tiver screenplay_id e conversation_id setados.",
                         "required_fields": required_fields
                     }
                 )
@@ -989,16 +990,21 @@ def create_app() -> FastAPI:
                 "last_execution": None
             }
 
-            # Add screenplay_id if provided
+            # Add screenplay_id (now required)
             screenplay_id = payload.get("screenplay_id")
             logger.info(f"🔍 [DEBUG] Processando screenplay_id:")
             logger.info(f"   - screenplay_id extraído: {screenplay_id}")
             logger.info(f"   - screenplay_id é truthy: {bool(screenplay_id)}")
-            if screenplay_id:
-                insert_doc["screenplay_id"] = screenplay_id
-                logger.info(f"   - ✅ screenplay_id adicionado ao insert_doc: {screenplay_id}")
-            else:
-                logger.warning(f"   - ❌ screenplay_id não foi adicionado (valor: {screenplay_id})")
+            insert_doc["screenplay_id"] = screenplay_id
+            logger.info(f"   - ✅ screenplay_id adicionado ao insert_doc: {screenplay_id}")
+
+            # Add conversation_id (now required)
+            conversation_id = payload.get("conversation_id")
+            logger.info(f"🔍 [DEBUG] Processando conversation_id:")
+            logger.info(f"   - conversation_id extraído: {conversation_id}")
+            logger.info(f"   - conversation_id é truthy: {bool(conversation_id)}")
+            insert_doc["conversation_id"] = conversation_id
+            logger.info(f"   - ✅ conversation_id adicionado ao insert_doc: {conversation_id}")
 
             # Add optional fields if provided
             # CWD: Try to inherit from screenplay if not provided
@@ -1025,6 +1031,8 @@ def create_app() -> FastAPI:
                 insert_doc["emoji"] = payload["emoji"]
             if "definition" in payload:
                 insert_doc["definition"] = payload["definition"]
+            if "display_order" in payload:
+                insert_doc["display_order"] = payload["display_order"]
 
             # Insert into MongoDB
             logger.info(f"🔍 [DEBUG] Documento final a ser inserido no MongoDB:")
@@ -1328,6 +1336,78 @@ def create_app() -> FastAPI:
             raise
         except Exception as e:
             logger.error(f"Error getting instance {instance_id}: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.patch("/api/agents/instances/reorder")
+    async def reorder_agent_instances(payload: dict[str, Any]):
+        """
+        🔥 NOVO: Atualiza a ordem de exibição dos agentes no dock.
+
+        Permite que o usuário reordene agentes via drag & drop,
+        persistindo a ordem customizada no MongoDB.
+
+        Request body:
+        {
+            "order_updates": [
+                {"instance_id": "instance-xxx", "display_order": 0},
+                {"instance_id": "instance-yyy", "display_order": 1},
+                ...
+            ]
+        }
+
+        Returns:
+            Confirmação de sucesso com número de agentes atualizados
+        """
+        if mongo_db is None:
+            raise HTTPException(status_code=503, detail="MongoDB connection not available")
+
+        try:
+            order_updates = payload.get("order_updates", [])
+
+            if not order_updates or not isinstance(order_updates, list):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Campo 'order_updates' é obrigatório e deve ser uma lista"
+                )
+
+            logger.info(f"🔄 [REORDER] Atualizando ordem de {len(order_updates)} agentes")
+
+            agent_instances = mongo_db["agent_instances"]
+            updated_count = 0
+
+            for update in order_updates:
+                instance_id = update.get("instance_id")
+                display_order = update.get("display_order")
+
+                if not instance_id or display_order is None:
+                    logger.warning(f"⚠️ [REORDER] Update inválido ignorado: {update}")
+                    continue
+
+                result = agent_instances.update_one(
+                    {"instance_id": instance_id},
+                    {
+                        "$set": {
+                            "display_order": display_order,
+                            "updated_at": datetime.now().isoformat()
+                        }
+                    }
+                )
+
+                if result.matched_count > 0:
+                    updated_count += 1
+
+            logger.info(f"✅ [REORDER] Ordem atualizada para {updated_count}/{len(order_updates)} agentes")
+
+            return {
+                "success": True,
+                "message": f"Ordem atualizada para {updated_count} agentes",
+                "updated_count": updated_count
+            }
+
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"❌ [REORDER] Erro ao atualizar ordem dos agentes: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail=str(e))
 
     @app.patch("/api/agents/instances/{instance_id}")
@@ -1690,6 +1770,154 @@ def create_app() -> FastAPI:
 
         except Exception as e:
             logger.error(f"Error listing processing tasks: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.get("/api/tasks/events")
+    async def list_tasks_as_events(
+        limit: int = Query(50, ge=1, le=200, description="Maximum number of events to return (default: 50, max: 200)"),
+        include_councilors: bool = Query(True, description="Include councilor executions (default: true)"),
+        include_regular: bool = Query(True, description="Include regular agent executions (default: true)")
+    ):
+        """
+        List recent tasks formatted as gamification events for the frontend.
+
+        This endpoint transforms MongoDB task documents into the same event format
+        used by WebSocket real-time events, enabling historical event loading after page reloads.
+
+        Query parameters:
+        - limit: Maximum number of events (default: 50, max: 200)
+        - include_councilors: Include councilor executions (default: true)
+        - include_regular: Include regular agent executions (default: true)
+
+        Returns:
+        - success: Boolean indicating success
+        - count: Number of events returned
+        - events: Array of gamification events with format:
+          {
+            "type": "agent_execution_completed" | "agent_execution_error",
+            "data": {
+              "execution_id": str,
+              "agent_id": str,
+              "agent_name": str,
+              "agent_emoji": str,
+              "status": str,
+              "severity": str,
+              "summary": str,
+              "duration_ms": int,
+              "completed_at": str,
+              "is_councilor": bool,
+              "level": "result" | "debug"
+            },
+            "timestamp": int (milliseconds)
+          }
+        """
+        if mongo_db is None:
+            raise HTTPException(status_code=503, detail="MongoDB connection not available")
+
+        try:
+            tasks_collection = mongo_db["tasks"]
+            agents_collection = mongo_db["agents"]
+
+            # Build query filter
+            query_filter = {"status": {"$in": ["completed", "error"]}}
+
+            # Filter by execution type
+            councilor_filters = []
+            if include_councilors:
+                councilor_filters.append({"is_councilor_execution": True})
+            if include_regular:
+                councilor_filters.append({"is_councilor_execution": {"$ne": True}})
+
+            if councilor_filters:
+                if len(councilor_filters) == 1:
+                    query_filter.update(councilor_filters[0])
+                else:
+                    query_filter["$or"] = councilor_filters
+
+            logger.info(f"Listing tasks as events with filter: {query_filter}, limit={limit}")
+
+            # Query MongoDB sorted by completed_at descending (most recent first)
+            cursor = tasks_collection.find(query_filter)
+            cursor = cursor.sort("completed_at", -1).limit(limit)
+
+            # Build agent cache to avoid repeated lookups
+            agent_cache = {}
+
+            events = []
+            for task_doc in cursor:
+                agent_id = task_doc.get("agent_id", "unknown")
+
+                # Get agent metadata (cached)
+                if agent_id not in agent_cache:
+                    agent = agents_collection.find_one({"agent_id": agent_id})
+                    if agent:
+                        definition = agent.get("definition", {})
+                        agent_cache[agent_id] = {
+                            "name": definition.get("name", agent_id),
+                            "emoji": definition.get("emoji", "🤖")
+                        }
+                    else:
+                        agent_cache[agent_id] = {
+                            "name": agent_id,
+                            "emoji": "🤖"
+                        }
+
+                agent_meta = agent_cache[agent_id]
+
+                # Determine event type
+                status = task_doc.get("status", "completed")
+                event_type = "agent_execution_error" if status == "error" else "agent_execution_completed"
+
+                # Extract task data
+                task_id = task_doc.get("task_id", "")
+                severity = task_doc.get("severity", "success")
+                result = task_doc.get("result", "")
+                duration = task_doc.get("duration", 0)
+                completed_at = task_doc.get("completed_at")
+                is_councilor = task_doc.get("is_councilor_execution", False)
+
+                # Generate summary
+                summary = result[:200] if result else "Execução concluída"
+                if len(result) > 200:
+                    summary += "..."
+
+                # Determine level (result for councilors/errors, debug for regular executions)
+                level = "result" if is_councilor or status == "error" else "debug"
+
+                # Convert timestamp to milliseconds
+                timestamp_ms = int(completed_at.timestamp() * 1000) if completed_at else 0
+
+                # Build event in same format as WebSocket
+                event = {
+                    "type": event_type,
+                    "data": {
+                        "execution_id": task_id,
+                        "agent_id": agent_id,
+                        "agent_name": agent_meta["name"],
+                        "agent_emoji": agent_meta["emoji"],
+                        "status": status,
+                        "severity": severity,
+                        "summary": summary,
+                        "duration_ms": int(duration * 1000),
+                        "completed_at": completed_at.isoformat() if completed_at else None,
+                        "is_councilor": is_councilor,
+                        "level": level
+                    },
+                    "timestamp": timestamp_ms
+                }
+
+                events.append(event)
+
+            logger.info(f"Retrieved {len(events)} tasks as events")
+
+            return {
+                "success": True,
+                "count": len(events),
+                "events": events
+            }
+
+        except Exception as e:
+            logger.error(f"Error listing tasks as events: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail=str(e))
 
     @app.get("/api/agents/context/{instance_id}")

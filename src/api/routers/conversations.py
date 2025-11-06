@@ -156,6 +156,12 @@ async def update_conversation_context(
     return await proxy_request("PATCH", f"/conversations/{conversation_id}/context", request)
 
 
+@router.patch("/reorder")
+async def reorder_conversations(request: Request):
+    """Proxy: Atualizar ordem de exibição das conversas."""
+    return await proxy_request("PATCH", "/conversations/reorder", request)
+
+
 @router.post("/{conversation_id}/context/upload")
 async def upload_context_file(
     conversation_id: str = Path(..., description="ID da conversa"),
