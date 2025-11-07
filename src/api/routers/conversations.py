@@ -156,6 +156,58 @@ async def update_conversation_context(
     return await proxy_request("PATCH", f"/conversations/{conversation_id}/context", request)
 
 
+@router.put("/{conversation_id}/messages/{message_id}/delete")
+async def delete_message(
+    conversation_id: str = Path(..., description="ID da conversa"),
+    message_id: str = Path(..., description="ID da mensagem")
+):
+    """
+    🔥 NOVO: Marca uma mensagem como deletada (soft delete).
+
+    Args:
+        conversation_id: ID da conversa
+        message_id: ID da mensagem (UUID)
+
+    Returns:
+        Confirmação de sucesso
+    """
+    from datetime import datetime
+    from src.config.settings import get_mongodb_client
+
+    try:
+        # Conectar ao MongoDB
+        client = get_mongodb_client()
+        db = client['conductor']
+        conversations = db['conversations']
+
+        # Atualizar a mensagem para marcar como deletada
+        result = conversations.update_one(
+            {
+                "conversation_id": conversation_id,
+                "messages.id": message_id
+            },
+            {
+                "$set": {
+                    "messages.$.isDeleted": True,
+                    "updated_at": datetime.utcnow().isoformat()
+                }
+            }
+        )
+
+        if result.matched_count == 0:
+            raise HTTPException(status_code=404, detail="Mensagem ou conversa não encontrada")
+
+        logger.info(f"✅ Mensagem {message_id} marcada como deletada na conversa {conversation_id}")
+
+        return {"success": True, "message": "Mensagem marcada como deletada"}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Erro ao deletar mensagem: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Erro ao deletar mensagem: {str(e)}")
+
+
 @router.patch("/reorder")
 async def reorder_conversations(request: Request):
     """Proxy: Atualizar ordem de exibição das conversas."""
