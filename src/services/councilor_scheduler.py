@@ -222,9 +222,10 @@ class CouncilorBackendScheduler:
 
         try:
             # Execute agent via Conductor API
+            prompt_text = task.get("prompt", "Analyze the project and provide insights")
             result = await self.conductor_client.execute_agent(
                 agent_name=agent_id,
-                prompt=task.get("prompt", "Analyze the project and provide insights"),
+                prompt=prompt_text,
                 instance_id=f"councilor_{agent_id}_{int(start_time.timestamp() * 1000)}",
                 context_mode="stateless",
                 timeout=600
@@ -247,6 +248,7 @@ class CouncilorBackendScheduler:
                     "task_name": task_name,
                     "display_name": display_name
                 },
+                "prompt": prompt_text,  # ← NOVO: Salva o prompt usado
                 "status": "completed",
                 "severity": severity,
                 "result": output,
@@ -298,6 +300,7 @@ class CouncilorBackendScheduler:
                     "task_name": task_name,
                     "display_name": display_name
                 },
+                "prompt": prompt_text,  # ← NOVO: Salva o prompt usado (mesmo em caso de erro)
                 "status": "error",
                 "severity": "error",
                 "result": None,

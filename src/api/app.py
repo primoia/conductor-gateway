@@ -20,6 +20,7 @@ from fastapi.responses import StreamingResponse
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from pymongo import MongoClient
+from bson import ObjectId
 
 from src.api.routers.screenplays import init_screenplay_service, router as screenplays_router
 from src.api.routers.persona import router as persona_router
@@ -716,16 +717,53 @@ def create_app() -> FastAPI:
             logger.error(f"Error listing agents: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail=str(e))
 
+    def analyze_severity(output: str) -> str:
+        """
+        Analyze output text to determine severity level.
+
+        Args:
+            output: Agent output text
+
+        Returns:
+            Severity string: "success", "warning", or "error"
+        """
+        if not output:
+            return "success"
+
+        lower_output = output.lower()
+
+        # Check for error indicators
+        error_keywords = [
+            'crítico', 'erro', 'falha', 'failed', 'error',
+            'critical', 'fatal', 'exception'
+        ]
+        if any(keyword in lower_output for keyword in error_keywords):
+            return 'error'
+
+        # Check for warning indicators
+        warning_keywords = [
+            'alerta', 'atenção', 'warning', 'aviso',
+            'vulnerab', 'deprecated', 'caution'
+        ]
+        if any(keyword in lower_output for keyword in warning_keywords):
+            return 'warning'
+
+        return 'success'
+
     @app.post("/api/agents/{agent_id}/execute")
     async def execute_agent_by_id(agent_id: str, request: AgentExecuteRequest):
         """
-        Execute a specific agent with input text and optional instance_id for context isolation.
+        Execute an agent via MongoDB Task Queue (asynchronous, resilient architecture).
 
-        Payload format:
+        This endpoint submits tasks to MongoDB collection and polls for completion.
+        The watcher process picks up pending tasks and executes them via LLM.
+
+        Payload example:
         {
-            "input_text": "Text to process",
-            "instance_id": "uuid-optional",
-            "context_mode": "stateful|stateless",
+            "input_text": "your input here",
+            "instance_id": "unique-instance-id",
+            "context_mode": "stateless|stateful",
+            "cwd": "/path/to/working/directory",
             "screenplay_id": "optional-screenplay-id",
             "document_id": "optional-document-id (deprecated, use screenplay_id)",
             "position": {"x": 100, "y": 200},
@@ -735,17 +773,17 @@ def create_app() -> FastAPI:
         if mongo_db is None:
             raise HTTPException(status_code=503, detail="MongoDB connection not available")
 
-        if not conductor_client:
-            raise HTTPException(status_code=503, detail="Conductor client not available")
-
         try:
-            # Extract fields from request model
+            # ========================================================================
+            # 1. EXTRACT AND VALIDATE REQUEST DATA
+            # ========================================================================
             input_text = request.input_text
             instance_id = request.instance_id
+            conversation_id = request.conversation_id
             context_mode = request.context_mode
             cwd = request.cwd
             position = request.position
-            ai_provider = request.ai_provider
+            ai_provider = request.ai_provider or "claude"  # Default to claude
 
             # Extract screenplay_id (support both screenplay_id and document_id for backward compatibility)
             screenplay_id = request.screenplay_id or request.document_id
@@ -754,21 +792,34 @@ def create_app() -> FastAPI:
             logger.info(f"📥 [GATEWAY] Requisição recebida em /api/agents/{agent_id}/execute")
             logger.info(f"   - agent_id: {agent_id}")
             logger.info(f"   - instance_id: {instance_id}")
+            logger.info(f"   - conversation_id: {conversation_id}")
             logger.info(f"   - input_text: {input_text[:100] if input_text else None}...")
             logger.info(f"   - context_mode: {context_mode}")
             logger.info(f"   - cwd: {cwd or 'não fornecido (usará default)'}")
             logger.info(f"   - ai_provider: {ai_provider}")
             logger.info("=" * 80)
 
+            # ========================================================================
+            # 🔥 VALIDAÇÕES OBRIGATÓRIAS: agent_id, instance_id, conversation_id
+            # ========================================================================
             if not input_text:
                 raise HTTPException(status_code=400, detail="input_text is required")
 
             if not instance_id:
-                logger.warning("⚠️ [GATEWAY] instance_id não foi fornecido! O histórico não será isolado por instância.")
-            else:
-                logger.info(f"✅ [GATEWAY] instance_id presente: {instance_id}")
+                raise HTTPException(
+                    status_code=400,
+                    detail="instance_id is required. Cannot execute agent without instance context."
+                )
 
-            # Get agent from MongoDB to verify it exists
+            if not conversation_id:
+                raise HTTPException(
+                    status_code=400,
+                    detail="conversation_id is required. Cannot execute agent without conversation context."
+                )
+
+            # ========================================================================
+            # 2. VERIFY AGENT EXISTS IN DATABASE
+            # ========================================================================
             agents_collection = mongo_db["agents"]
             # Try to find by agent_id first, then fallback to name for compatibility
             agent = agents_collection.find_one({"agent_id": agent_id})
@@ -784,21 +835,17 @@ def create_app() -> FastAPI:
             # Use cwd from payload if provided, otherwise use default from config
             final_cwd = cwd or CONDUCTOR_CONFIG.get("project_path")
 
-            logger.info(f"🚀 [GATEWAY] Chamando conductor_client.execute_agent():")
-            logger.info(f"   - agent_name: {agent.get('name') or agent_id}")
-            logger.info(f"   - instance_id: {instance_id}")
-            logger.info(f"   - context_mode: {context_mode}")
-            logger.info(f"   - cwd final: {final_cwd}")
-            logger.info(f"   - ai_provider: {ai_provider}")
-
-            # 🔔 Emit "agent_execution_started" event via WebSocket
-            start_time = datetime.now()
+            # ========================================================================
+            # 3. EMIT WEBSOCKET EVENT: agent_execution_started
+            # ========================================================================
+            start_time = datetime.utcnow()
             execution_id = f"exec_{actual_agent_id}_{int(start_time.timestamp() * 1000)}"
-            try:
-                agent_definition = agent.get("definition", {}) if isinstance(agent.get("definition"), dict) else {}
-                agent_name = agent_definition.get("name", agent_id)
-                agent_emoji = agent_definition.get("emoji", "🤖")
 
+            agent_definition = agent.get("definition", {}) if isinstance(agent.get("definition"), dict) else {}
+            agent_name = agent_definition.get("name", agent_id)
+            agent_emoji = agent_definition.get("emoji", "🤖")
+
+            try:
                 await gamification_manager.broadcast("agent_execution_started", {
                     "agent_id": actual_agent_id,
                     "agent_name": agent_name,
@@ -811,31 +858,128 @@ def create_app() -> FastAPI:
             except Exception as e:
                 logger.warning(f"⚠️ Failed to broadcast agent_execution_started event: {e}")
 
-            # Execute the agent via Conductor API
-            response = await conductor_client.execute_agent(
-                agent_name=agent.get("name") or agent_id,
-                prompt=input_text,
-                instance_id=instance_id,
-                context_mode=context_mode,
-                cwd=final_cwd,
-                timeout=CONDUCTOR_CONFIG.get("timeout", 600),
-                ai_provider=ai_provider,
-            )
+            # ========================================================================
+            # 4. SUBMIT TASK TO MONGODB QUEUE (status: "pending")
+            # ========================================================================
+            logger.info("🔄 [GATEWAY] Submitting task to MongoDB queue...")
 
-            end_time = datetime.now()
-            duration_ms = int((end_time - start_time).total_seconds() * 1000)
+            tasks_collection = mongo_db["tasks"]
 
-            logger.info(f"✅ [GATEWAY] Resposta recebida do conductor")
-            logger.info(f"   - Status: success" if response else "   - Status: error")
+            # Create task document with status "pending" for watcher to process
+            task_document = {
+                "_id": ObjectId(),  # Generate _id upfront
+                "task_id": execution_id,
+                "agent_id": actual_agent_id,
+                "provider": ai_provider,
+                "prompt": input_text,  # Full prompt for watcher
+                "cwd": final_cwd,
+                "timeout": CONDUCTOR_CONFIG.get("timeout", 600),
+                "status": "pending",  # Watcher will pick this up
+                "instance_id": instance_id,
+                "conversation_id": conversation_id,  # Required field from request
+                "context_mode": context_mode,
+                "context": {
+                    "screenplay_id": screenplay_id,
+                    "position": position,
+                },
+                "created_at": datetime.utcnow(),
+                "updated_at": datetime.utcnow(),
+                "result": "",
+                "exit_code": None,
+                "duration": None,
+                "is_councilor_execution": False,
+                "severity": None,
+            }
 
-            # 🔔 Emit "agent_execution_completed" event via WebSocket
+            # Insert task into MongoDB
+            tasks_collection.insert_one(task_document)
+            task_id_str = str(task_document["_id"])
+
+            logger.info(f"✅ [GATEWAY] Task submitted to queue: {task_id_str}")
+            logger.info(f"   - execution_id: {execution_id}")
+            logger.info(f"   - agent_id: {actual_agent_id}")
+            logger.info(f"   - provider: {ai_provider}")
+            logger.info(f"   - status: pending (awaiting watcher)")
+
+            # ========================================================================
+            # 5. POLLING: Wait for watcher to process and complete the task
+            # ========================================================================
+            logger.info(f"⏳ [GATEWAY] Polling task {task_id_str} for completion...")
+
+            poll_interval = 2.0  # seconds
+            timeout = CONDUCTOR_CONFIG.get("timeout", 600) + 30  # Add buffer
+            start_poll_time = time.time()
+
+            task_status = "pending"
+            task_doc = None
+
+            while time.time() - start_poll_time < timeout:
+                # Fetch task from MongoDB
+                task_doc = tasks_collection.find_one({"_id": task_document["_id"]})
+
+                if not task_doc:
+                    raise HTTPException(
+                        status_code=500,
+                        detail=f"Task {task_id_str} disappeared from database"
+                    )
+
+                task_status = task_doc.get("status")
+
+                # Check if task is completed or failed
+                if task_status not in ["pending", "processing"]:
+                    logger.info(f"✅ [GATEWAY] Task {task_id_str} completed with status: {task_status}")
+                    break
+
+                # Log progress
+                if task_status == "processing":
+                    logger.debug(f"⏳ Task {task_id_str} is being processed by watcher...")
+
+                # Wait before next poll
+                await asyncio.sleep(poll_interval)
+
+            # Check if we timed out
+            if task_status in ["pending", "processing"]:
+                logger.error(f"⏰ [GATEWAY] Task {task_id_str} timed out after {timeout}s")
+                raise HTTPException(
+                    status_code=504,
+                    detail=f"Task execution timed out after {timeout} seconds. Task status: {task_status}"
+                )
+
+            # ========================================================================
+            # 6. EXTRACT RESULT FROM COMPLETED TASK
+            # ========================================================================
+            result_text = task_doc.get("result", "")
+            exit_code = task_doc.get("exit_code", 0)
+            duration = task_doc.get("duration", 0)
+            severity = task_doc.get("severity")
+
+            # Analyze severity if not set by watcher
+            if not severity:
+                if exit_code == 0:
+                    severity = analyze_severity(result_text)
+                else:
+                    severity = "error"
+
+                # Update severity in task document
+                tasks_collection.update_one(
+                    {"_id": task_document["_id"]},
+                    {"$set": {"severity": severity}}
+                )
+
+            end_time = task_doc.get("completed_at") or datetime.utcnow()
+            duration_ms = int(duration * 1000) if duration else 0
+
+            logger.info(f"📊 [GATEWAY] Task execution completed:")
+            logger.info(f"   - Status: {task_status}")
+            logger.info(f"   - Severity: {severity}")
+            logger.info(f"   - Exit code: {exit_code}")
+            logger.info(f"   - Duration: {duration_ms}ms")
+            logger.info(f"   - Result length: {len(result_text)} chars")
+
+            # ========================================================================
+            # 7. EMIT WEBSOCKET EVENT: agent_execution_completed
+            # ========================================================================
             try:
-                # Determine status/severity from response
-                status = "completed" if response else "error"
-                severity = "success" if response and response.get("status") != "error" else "error"
-
-                # Extract result summary (first 200 chars of agent response)
-                result_text = response.get("result") or response.get("stdout") or str(response)
                 summary = result_text[:200] if result_text else "Sem resultado"
 
                 await gamification_manager.broadcast("agent_execution_completed", {
@@ -844,26 +988,25 @@ def create_app() -> FastAPI:
                     "agent_emoji": agent_emoji,
                     "instance_id": instance_id,
                     "execution_id": execution_id,
-                    "status": status,
+                    "status": task_status,
                     "severity": severity,
                     "started_at": start_time.isoformat(),
-                    "completed_at": end_time.isoformat(),
+                    "completed_at": end_time.isoformat() if hasattr(end_time, 'isoformat') else str(end_time),
                     "duration_ms": duration_ms,
-                    "level": "result",  # Result level - agent output
-                    "summary": summary  # First 200 chars of result
+                    "level": "result",
+                    "summary": summary
                 })
             except Exception as e:
                 logger.warning(f"⚠️ Failed to broadcast agent_execution_completed event: {e}")
 
-            # Extract result from response
-            result_text = response.get("result") or response.get("stdout") or str(response)
-
-            # Save/update metadata for instance (if instance_id provided)
+            # ========================================================================
+            # 8. UPDATE INSTANCE METADATA (if instance_id provided)
+            # ========================================================================
             if instance_id:
                 agent_instances = mongo_db["agent_instances"]
                 update_data = {
                     "agent_id": actual_agent_id,
-                    "last_execution": datetime.now().isoformat(),
+                    "last_execution": datetime.utcnow().isoformat(),
                 }
 
                 # Add optional fields if provided
@@ -875,34 +1018,40 @@ def create_app() -> FastAPI:
                 # Check if this is first execution
                 existing = agent_instances.find_one({"instance_id": instance_id})
                 if not existing:
-                    update_data["created_at"] = datetime.now().isoformat()
+                    update_data["created_at"] = datetime.utcnow().isoformat()
 
                 agent_instances.update_one(
-                    {"instance_id": instance_id}, {"$set": update_data}, upsert=True
+                    {"instance_id": instance_id},
+                    {"$set": update_data},
+                    upsert=True
                 )
 
                 logger.info(f"Updated metadata for instance {instance_id}")
 
-                # Note: Conversation history is now saved by conductor-api in agent_conversations collection
-                # This avoids duplication and keeps history management centralized
-
+            # ========================================================================
+            # 9. RETURN RESULT TO CLIENT
+            # ========================================================================
             return {
-                "status": "success",
-                "result": response,
+                "status": "success" if exit_code == 0 else "error",
+                "result": {
+                    "result": result_text,
+                    "exit_code": exit_code,
+                    "status": task_status,
+                },
                 "instance_id": instance_id,
                 "context_mode": context_mode,
+                "execution_id": execution_id,
+                "task_id": task_id_str,
+                "duration_ms": duration_ms,
             }
 
         except HTTPException:
             raise
-        except httpx.HTTPStatusError as e:
-            logger.error(f"Conductor API error: {e.response.status_code} - {e.response.text}")
-            raise HTTPException(
-                status_code=e.response.status_code,
-                detail=f"Conductor API error: {e.response.text}",
-            )
         except Exception as e:
-            logger.error(f"Error executing agent {agent_id}: {e}", exc_info=True)
+            error_msg = str(e)
+            logger.error(f"❌ Error executing agent {agent_id}: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail=error_msg)
+
             raise HTTPException(status_code=500, detail=str(e))
 
     @app.post("/api/agents/instances")
@@ -1918,6 +2067,106 @@ def create_app() -> FastAPI:
 
         except Exception as e:
             logger.error(f"Error listing tasks as events: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.get("/api/tasks/{task_id}/details")
+    async def get_task_details(task_id: str):
+        """
+        Get complete task details including full prompt and result (not truncated).
+
+        This endpoint is used by the report modal to load complete task data
+        when the user wants to see the full prompt and result.
+
+        Path parameters:
+        - task_id: The unique task execution ID
+
+        Returns:
+        - success: Boolean indicating success
+        - task: Complete task object with full prompt and result:
+          {
+            "task_id": str,
+            "agent_id": str,
+            "agent_name": str,
+            "agent_emoji": str,
+            "prompt": str | null,  # Full input text (if available)
+            "result": str | null,  # Full result (not truncated)
+            "status": str,
+            "severity": str,
+            "created_at": str,
+            "completed_at": str,
+            "duration": float,
+            "error": str | null,
+            "is_councilor": bool
+          }
+        """
+        if mongo_db is None:
+            raise HTTPException(status_code=503, detail="MongoDB connection not available")
+
+        try:
+            tasks_collection = mongo_db["tasks"]
+            agents_collection = mongo_db["agents"]
+
+            logger.info(f"Fetching task details for task_id: {task_id}")
+
+            # Find task by task_id (try multiple fields as fallback)
+            task_doc = tasks_collection.find_one({"task_id": task_id})
+
+            # Fallback: try searching by _id if it looks like an ObjectId
+            if not task_doc:
+                try:
+                    from bson import ObjectId
+                    if len(task_id) == 24:  # ObjectId length
+                        task_doc = tasks_collection.find_one({"_id": ObjectId(task_id)})
+                except Exception:
+                    pass
+
+            if not task_doc:
+                logger.warning(f"Task not found: {task_id}")
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Task não encontrada. Este evento pode não ter dados completos salvos no banco de dados."
+                )
+
+            # Get agent metadata
+            agent_id = task_doc.get("agent_id", "unknown")
+            agent = agents_collection.find_one({"agent_id": agent_id})
+
+            if agent:
+                definition = agent.get("definition", {})
+                agent_name = definition.get("name", agent_id)
+                agent_emoji = definition.get("emoji", "🤖")
+            else:
+                agent_name = agent_id
+                agent_emoji = "🤖"
+
+            # Build complete task details
+            task_details = {
+                "task_id": task_doc.get("task_id", ""),
+                "agent_id": agent_id,
+                "agent_name": agent_name,
+                "agent_emoji": agent_emoji,
+                "prompt": task_doc.get("prompt") or task_doc.get("input_text"),  # Try both fields
+                "result": task_doc.get("result"),  # Full result, not truncated
+                "status": task_doc.get("status", "unknown"),
+                "severity": task_doc.get("severity", "info"),
+                "created_at": task_doc.get("created_at").isoformat() if task_doc.get("created_at") else None,
+                "completed_at": task_doc.get("completed_at").isoformat() if task_doc.get("completed_at") else None,
+                "duration": task_doc.get("duration", 0),
+                "error": task_doc.get("error"),
+                "is_councilor": task_doc.get("is_councilor_execution", False)
+            }
+
+            logger.info(f"Successfully retrieved task details for {task_id}")
+
+            return {
+                "success": True,
+                "task": task_details
+            }
+
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Error fetching task details for {task_id}: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail=str(e))
 
     @app.get("/api/agents/context/{instance_id}")
