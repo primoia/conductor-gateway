@@ -58,7 +58,7 @@ class ConductorClient:
         """
         payload = {
             "agent_name": agent_name,
-            "prompt": prompt,
+            "input_text": prompt,  # ← Changed from "prompt" to "input_text" (user input only, Conductor will build full prompt)
             "context_mode": context_mode,
             "timeout": timeout,
         }
@@ -82,7 +82,8 @@ class ConductorClient:
         logger.info(f"   - instance_id: {instance_id}")
         logger.info(f"   - context_mode: {context_mode}")
         logger.info(f"   - ai_provider: {ai_provider}")
-        logger.info(f"   - prompt: {prompt[:100]}...")
+        logger.info(f"   - input_text (user input): {prompt[:100]}...")
+        logger.info(f"   - Note: Conductor API will build FULL prompt with PromptEngine")
         logger.info(f"   - Payload completo: {payload}")
         logger.info("=" * 80)
 

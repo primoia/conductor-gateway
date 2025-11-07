@@ -199,6 +199,123 @@ async def run_agent_with_queue(job_id: str, payload: dict[str, Any], queue: asyn
         logger.info(f"Cleaned up stream for job {job_id}")
 
 
+async def monitor_task_and_stream(job_id: str, task_id: str, queue: asyncio.Queue):
+    """
+    Monitor a MongoDB task and emit SSE events as it progresses.
+
+    Args:
+        job_id: Unique job identifier for SSE stream
+        task_id: MongoDB task _id to monitor
+        queue: asyncio.Queue to emit events to
+    """
+    try:
+        logger.info(f"🔍 [SSE] Starting task monitor for job {job_id}, task {task_id}")
+
+        # Send initial event
+        await queue.put({
+            "event": "task_started",
+            "data": {"message": "Tarefa submetida ao Conductor, aguardando processamento..."},
+            "timestamp": time.time(),
+            "job_id": job_id,
+            "task_id": task_id
+        })
+
+        # Poll MongoDB task collection for status updates
+        poll_interval = 2.0  # seconds
+        max_duration = 600  # 10 minutes max
+        start_time = time.time()
+        last_status = None
+
+        while time.time() - start_time < max_duration:
+            # Query task from MongoDB
+            task_doc = mongo_db.tasks.find_one({"_id": ObjectId(task_id)})
+
+            if not task_doc:
+                logger.error(f"❌ [SSE] Task {task_id} not found in MongoDB")
+                await queue.put({
+                    "event": "error",
+                    "data": {"error": f"Task {task_id} não encontrada"},
+                    "timestamp": time.time(),
+                    "job_id": job_id
+                })
+                break
+
+            current_status = task_doc.get("status")
+
+            # Emit status change event
+            if current_status != last_status:
+                logger.info(f"📡 [SSE] Task {task_id} status: {last_status} -> {current_status}")
+
+                if current_status == "processing":
+                    await queue.put({
+                        "event": "status_update",
+                        "data": {"message": "Agente processando a tarefa..."},
+                        "timestamp": time.time(),
+                        "job_id": job_id,
+                        "status": current_status
+                    })
+
+                last_status = current_status
+
+            # Check if task is complete
+            if current_status in ["completed", "error", "failed"]:
+                logger.info(f"✅ [SSE] Task {task_id} finished with status: {current_status}")
+
+                result_text = task_doc.get("result", "")
+                exit_code = task_doc.get("exit_code", 0)
+                duration = task_doc.get("duration", 0)
+
+                # Emit result event
+                await queue.put({
+                    "event": "result",
+                    "data": {
+                        "result": result_text,
+                        "exit_code": exit_code,
+                        "status": current_status,
+                        "duration": duration,
+                        "message": "Tarefa concluída com sucesso" if current_status == "completed" else "Tarefa falhou"
+                    },
+                    "timestamp": time.time(),
+                    "job_id": job_id,
+                    "task_id": task_id
+                })
+                break
+
+            # Wait before next poll
+            await asyncio.sleep(poll_interval)
+
+        # Check for timeout
+        if time.time() - start_time >= max_duration:
+            logger.warning(f"⏰ [SSE] Task {task_id} monitoring timed out")
+            await queue.put({
+                "event": "error",
+                "data": {"error": "Timeout aguardando conclusão da tarefa"},
+                "timestamp": time.time(),
+                "job_id": job_id
+            })
+
+    except Exception as e:
+        logger.error(f"❌ [SSE] Error monitoring task {task_id}: {e}", exc_info=True)
+        await queue.put({
+            "event": "error",
+            "data": {"error": str(e)},
+            "timestamp": time.time(),
+            "job_id": job_id
+        })
+
+    finally:
+        # Send end of stream
+        await queue.put({
+            "event": "end_of_stream",
+            "data": {"message": "Stream finalizado"},
+            "timestamp": time.time(),
+            "job_id": job_id
+        })
+        # Clean up
+        ACTIVE_STREAMS.pop(job_id, None)
+        logger.info(f"🧹 [SSE] Cleaned up stream for job {job_id}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan event handler for FastAPI."""
@@ -369,33 +486,114 @@ def create_app() -> FastAPI:
 
     @app.post("/api/v1/stream-execute")
     async def start_execution(request: Request):
-        """Start execution and return job_id for SSE streaming (Plan2 Hybrid Pattern)."""
+        """
+        Start execution and return job_id for SSE streaming (Plan2 Hybrid Pattern).
+
+        This endpoint accepts the conductor chat payload and delegates execution to the Conductor API.
+        It monitors the task in MongoDB and emits SSE events as it progresses.
+        """
         try:
             # Generate unique job ID
             job_id = f"job_{uuid.uuid4()}"
 
             # Parse request payload
             payload = await request.json()
-            command_preview = payload.get("textEntries", [{}])[0].get("content", "")[:50]
-            if not command_preview:
-                command_preview = payload.get("input", "")[:50] or payload.get("command", "")[:50]
 
-            logger.info(
-                f"Starting streaming execution for job {job_id}, command: {command_preview}..."
-            )
+            # Extract conductor-specific parameters
+            # Frontend sends: { uid, title, textEntries: [{content: "..."}], ... }
+            input_text = ""
+            if "textEntries" in payload and payload["textEntries"]:
+                input_text = payload["textEntries"][0].get("content", "")
+            elif "input" in payload:
+                input_text = payload["input"]
+            elif "command" in payload:
+                input_text = payload["command"]
+
+            # Extract other parameters from payload
+            # These should be added by the frontend
+            agent_id = payload.get("agent_id", "default")  # Frontend must provide this
+            instance_id = payload.get("instance_id", f"instance-{int(time.time()*1000)}")
+            conversation_id = payload.get("conversation_id")
+            screenplay_id = payload.get("screenplay_id")
+            cwd = payload.get("cwd", "/app")
+            ai_provider = payload.get("ai_provider", "claude")
+            context_mode = payload.get("context_mode", "stateless")
+
+            # 🔥 Gateway generates task_id
+            from bson import ObjectId
+            task_id = str(ObjectId())
+
+            logger.info(f"🚀 [SSE] Starting streaming execution for job {job_id}")
+            logger.info(f"   - task_id: {task_id} (gateway-generated)")
+            logger.info(f"   - agent_id: {agent_id}")
+            logger.info(f"   - instance_id: {instance_id}")
+            logger.info(f"   - conversation_id: {conversation_id}")
+            logger.info(f"   - input: {input_text[:50]}...")
 
             # Create event queue for this job
-            event_queue: asyncio.Queue = asyncio.Queue(maxsize=1000)  # Prevent memory issues
+            event_queue: asyncio.Queue = asyncio.Queue(maxsize=1000)
             ACTIVE_STREAMS[job_id] = event_queue
 
-            # Start agent execution in background task
-            asyncio.create_task(run_agent_with_queue(job_id, payload, event_queue))
+            # Start background task that calls Conductor and monitors
+            async def execute_conductor_with_monitoring():
+                try:
+                    # Call Conductor API to submit task
+                    conductor_api_url = os.getenv("CONDUCTOR_API_URL", "http://localhost:8000")
+
+                    conductor_payload = {
+                        "task_id": task_id,  # 🔥 Gateway-generated task_id
+                        "user_input": input_text,
+                        "cwd": cwd,
+                        "timeout": 600,
+                        "provider": ai_provider,
+                        "instance_id": instance_id,
+                        "conversation_id": conversation_id,
+                        "screenplay_id": screenplay_id,
+                        "context_mode": context_mode,
+                        "wait_for_result": False  # 🔥 SSE: Return task_id immediately, don't wait
+                    }
+
+                    logger.info(f"📤 [SSE] Calling Conductor API for job {job_id} with task_id {task_id}")
+
+                    async with httpx.AsyncClient(timeout=650) as client:
+                        response = await client.post(
+                            f"{conductor_api_url}/agents/{agent_id}/execute",
+                            json=conductor_payload
+                        )
+                        response.raise_for_status()
+                        conductor_result = response.json()
+
+                    # Conductor should return immediately with task_id
+                    logger.info(f"✅ [SSE] Conductor API accepted task {task_id} for job {job_id}")
+                    logger.info(f"   - Response status: {conductor_result.get('status')}")
+
+                    # Start monitoring the task in MongoDB
+                    await monitor_task_and_stream(job_id, task_id, event_queue)
+
+                except Exception as e:
+                    logger.error(f"❌ [SSE] Error in job {job_id}: {e}", exc_info=True)
+                    await event_queue.put({
+                        "event": "error",
+                        "data": {"error": str(e)},
+                        "timestamp": time.time(),
+                        "job_id": job_id
+                    })
+                    await event_queue.put({
+                        "event": "end_of_stream",
+                        "data": {"message": "Stream finalizado com erro"},
+                        "timestamp": time.time(),
+                        "job_id": job_id
+                    })
+                    ACTIVE_STREAMS.pop(job_id, None)
+
+            # Start background task
+            asyncio.create_task(execute_conductor_with_monitoring())
 
             # Return job_id immediately
             return {"job_id": job_id, "status": "started", "stream_url": f"/api/v1/stream/{job_id}"}
 
         except Exception as e:
-            logger.error(f"Error starting execution: {e}", exc_info=True)
+            logger.error(f"❌ [SSE] Error starting execution: {e}", exc_info=True)
             return {"error": str(e)}, 500
 
     @app.get("/api/v1/stream/{job_id}")
@@ -859,99 +1057,73 @@ def create_app() -> FastAPI:
                 logger.warning(f"⚠️ Failed to broadcast agent_execution_started event: {e}")
 
             # ========================================================================
-            # 4. SUBMIT TASK TO MONGODB QUEUE (status: "pending")
+            # 4. CALL CONDUCTOR API (which will build prompt and insert to MongoDB)
             # ========================================================================
-            logger.info("🔄 [GATEWAY] Submitting task to MongoDB queue...")
+            logger.info("🔄 [GATEWAY] Calling Conductor API to execute agent...")
+            logger.info(f"   - Conductor API will build the complete prompt using PromptEngine")
+            logger.info(f"   - Then submit to MongoDB tasks collection")
 
-            tasks_collection = mongo_db["tasks"]
+            # 🔥 Gateway generates task_id
+            from bson import ObjectId
+            task_id = str(ObjectId())
 
-            # Create task document with status "pending" for watcher to process
-            task_document = {
-                "_id": ObjectId(),  # Generate _id upfront
-                "task_id": execution_id,
-                "agent_id": actual_agent_id,
-                "provider": ai_provider,
-                "prompt": input_text,  # Full prompt for watcher
+            # Make HTTP request to Conductor API
+            import httpx
+            conductor_api_url = os.getenv("CONDUCTOR_API_URL", CONDUCTOR_CONFIG.get("conductor_api_url", "http://localhost:8000"))
+
+            payload = {
+                "task_id": task_id,  # 🔥 Gateway-generated task_id
+                "user_input": input_text,  # ← User input only
                 "cwd": final_cwd,
                 "timeout": CONDUCTOR_CONFIG.get("timeout", 600),
-                "status": "pending",  # Watcher will pick this up
+                "provider": ai_provider,
                 "instance_id": instance_id,
-                "conversation_id": conversation_id,  # Required field from request
-                "context_mode": context_mode,
-                "context": {
-                    "screenplay_id": screenplay_id,
-                    "position": position,
-                },
-                "created_at": datetime.utcnow(),
-                "updated_at": datetime.utcnow(),
-                "result": "",
-                "exit_code": None,
-                "duration": None,
-                "is_councilor_execution": False,
-                "severity": None,
+                "conversation_id": conversation_id,  # ← REQUIRED: Pass conversation_id for history
+                "screenplay_id": screenplay_id,  # ← REQUIRED: Pass screenplay_id for project context
+                "context_mode": context_mode
             }
 
-            # Insert task into MongoDB
-            tasks_collection.insert_one(task_document)
-            task_id_str = str(task_document["_id"])
+            logger.info(f"📤 [GATEWAY] POST {conductor_api_url}/agents/{actual_agent_id}/execute")
+            logger.info(f"   - task_id: {task_id} (gateway-generated)")
+            logger.info(f"   - user_input: {input_text[:100]}...")
+            logger.info(f"   - instance_id: {instance_id}")
+            logger.info(f"   - conversation_id: {conversation_id}")
+            logger.info(f"   - screenplay_id: {screenplay_id}")
+            logger.info(f"   - context_mode: {context_mode}")
 
-            logger.info(f"✅ [GATEWAY] Task submitted to queue: {task_id_str}")
-            logger.info(f"   - execution_id: {execution_id}")
-            logger.info(f"   - agent_id: {actual_agent_id}")
-            logger.info(f"   - provider: {ai_provider}")
-            logger.info(f"   - status: pending (awaiting watcher)")
+            async with httpx.AsyncClient(timeout=CONDUCTOR_CONFIG.get("timeout", 600) + 30) as client:
+                try:
+                    response = await client.post(
+                        f"{conductor_api_url}/agents/{actual_agent_id}/execute",
+                        json=payload
+                    )
+                    response.raise_for_status()
+                    conductor_result = response.json()
 
-            # ========================================================================
-            # 5. POLLING: Wait for watcher to process and complete the task
-            # ========================================================================
-            logger.info(f"⏳ [GATEWAY] Polling task {task_id_str} for completion...")
+                    logger.info(f"✅ [GATEWAY] Conductor API responded successfully")
+                    logger.info(f"   - Status: {response.status_code}")
 
-            poll_interval = 2.0  # seconds
-            timeout = CONDUCTOR_CONFIG.get("timeout", 600) + 30  # Add buffer
-            start_poll_time = time.time()
-
-            task_status = "pending"
-            task_doc = None
-
-            while time.time() - start_poll_time < timeout:
-                # Fetch task from MongoDB
-                task_doc = tasks_collection.find_one({"_id": task_document["_id"]})
-
-                if not task_doc:
+                except httpx.HTTPStatusError as e:
+                    logger.error(f"❌ [GATEWAY] Conductor API error: {e.response.status_code}")
+                    logger.error(f"   - Response: {e.response.text[:500]}")
                     raise HTTPException(
-                        status_code=500,
-                        detail=f"Task {task_id_str} disappeared from database"
+                        status_code=e.response.status_code,
+                        detail=f"Conductor API error: {e.response.text}"
+                    )
+                except httpx.RequestError as e:
+                    logger.error(f"❌ [GATEWAY] Connection error to Conductor API: {e}")
+                    raise HTTPException(
+                        status_code=503,
+                        detail=f"Cannot connect to Conductor API: {str(e)}"
                     )
 
-                task_status = task_doc.get("status")
-
-                # Check if task is completed or failed
-                if task_status not in ["pending", "processing"]:
-                    logger.info(f"✅ [GATEWAY] Task {task_id_str} completed with status: {task_status}")
-                    break
-
-                # Log progress
-                if task_status == "processing":
-                    logger.debug(f"⏳ Task {task_id_str} is being processed by watcher...")
-
-                # Wait before next poll
-                await asyncio.sleep(poll_interval)
-
-            # Check if we timed out
-            if task_status in ["pending", "processing"]:
-                logger.error(f"⏰ [GATEWAY] Task {task_id_str} timed out after {timeout}s")
-                raise HTTPException(
-                    status_code=504,
-                    detail=f"Task execution timed out after {timeout} seconds. Task status: {task_status}"
-                )
-
             # ========================================================================
-            # 6. EXTRACT RESULT FROM COMPLETED TASK
+            # 5. EXTRACT RESULT FROM CONDUCTOR API RESPONSE
             # ========================================================================
-            result_text = task_doc.get("result", "")
-            exit_code = task_doc.get("exit_code", 0)
-            duration = task_doc.get("duration", 0)
-            severity = task_doc.get("severity")
+            result_text = conductor_result.get("result", "")
+            exit_code = conductor_result.get("exit_code", 0)
+            duration = conductor_result.get("duration", 0)
+            severity = conductor_result.get("severity")
 
             # Analyze severity if not set by watcher
             if not severity:
@@ -960,13 +1132,11 @@ def create_app() -> FastAPI:
                 else:
                     severity = "error"
 
-                # Update severity in task document
-                tasks_collection.update_one(
-                    {"_id": task_document["_id"]},
-                    {"$set": {"severity": severity}}
-                )
+            # Determine task status based on exit code
+            task_status = "completed" if exit_code == 0 else "error"
 
-            end_time = task_doc.get("completed_at") or datetime.utcnow()
+            # Set end time
+            end_time = datetime.utcnow()
             duration_ms = int(duration * 1000) if duration else 0
 
             logger.info(f"📊 [GATEWAY] Task execution completed:")
@@ -1041,7 +1211,7 @@ def create_app() -> FastAPI:
                 "instance_id": instance_id,
                 "context_mode": context_mode,
                 "execution_id": execution_id,
-                "task_id": task_id_str,
+                "task_id": task_id,
                 "duration_ms": duration_ms,
             }
 
@@ -1051,8 +1221,6 @@ def create_app() -> FastAPI:
             error_msg = str(e)
             logger.error(f"❌ Error executing agent {agent_id}: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail=error_msg)
-
-            raise HTTPException(status_code=500, detail=str(e))
 
     @app.post("/api/agents/instances")
     async def create_agent_instance(payload: dict[str, Any]):
