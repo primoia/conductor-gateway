@@ -84,6 +84,53 @@ Your client application should parse these JSON objects to provide real-time fee
 
 ---
 
+## API Routers Overview
+
+The gateway provides multiple domain-specific routers:
+
+### Agent Management (`/api/agents`)
+
+-   **Agent Instance CRUD**: Create, read, update, delete agent instances
+-   **Agent Execution**: Execute agents with custom working directories
+-   **Statistics**: Track agent execution statistics and performance
+
+### Screenplay Management (`/api/screenplays`)
+
+-   **CRUD Operations**: Full lifecycle management of screenplays
+-   **Validation**: Markdown validation and duplicate detection
+-   **Metadata**: Manage screenplay metadata and configurations
+-   **Working Directory Support**: Execute screenplays in custom directories
+
+### Persona Management (`/api/personas`, `/api/persona-versions`)
+
+-   **Persona CRUD**: Create and manage persona configurations
+-   **Version Control**: Track persona versions and history
+-   **Rollback**: Restore previous persona versions
+
+### Councilor System (`/api/councilor`)
+
+-   **Automated Monitoring**: Schedule periodic agent executions
+-   **Backend Scheduler**: APScheduler-based task scheduling
+-   **WebSocket Updates**: Real-time councilor status updates
+-   **Statistics Tracking**: Monitor councilor performance
+
+### Conversation Management (`/api/conversations`)
+
+-   **Message Management**: CRUD operations for messages
+-   **Soft Delete**: Safe deletion with propagation to history
+-   **Title & Context Editing**: Update conversation metadata
+-   **Message Threading**: Organize conversation flow
+
+### Portfolio Management (`/api/portfolio`)
+
+-   **Portfolio Chat**: Portfolio-specific chat endpoints
+-   **Rate Limiting**: Protect against abuse with SlowAPI
+
+### Gamification (`/api/v1/tasks/events`)
+
+-   **Task Events**: Historical gamification data
+-   **Event Tracking**: Track user achievements and progress
+
 ## Other Endpoints
 
 ### Health Check
