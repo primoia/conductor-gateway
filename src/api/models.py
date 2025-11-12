@@ -11,6 +11,7 @@ class AgentExecuteRequest(BaseModel):
 
     input_text: str
     instance_id: Optional[str] = None
+    conversation_id: Optional[str] = None
     context_mode: str = "stateless"
     cwd: Optional[str] = None
     screenplay_id: Optional[str] = None

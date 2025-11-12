@@ -12,8 +12,10 @@
 
 ### 🔄 **Real-time Agent Execution**
 - **SSE Streaming**: Live event streaming from agent execution with job queues
+- **Task Queue Architecture**: Advanced queue-based agent execution with concurrent processing
 - **Multiple Payload Formats**: Support for `textEntries`, `input`, and `command` formats
 - **Background Processing**: Non-blocking agent execution with real-time updates
+- **WebSocket Support**: Real-time bidirectional communication for live updates
 
 ### 🛠 **MCP Server Integration**
 - **13+ Advanced Tools**: Complete Conductor CLI integration including:
@@ -23,11 +25,34 @@
   - System management (backup, restore, migration)
   - Template installation and configuration
 
+### 📝 **Content Management**
+- **Screenplay Management**: Complete CRUD operations for screenplay handling
+  - Working directory support for custom execution contexts
+  - Markdown validation and duplicate detection
+  - Metadata management and force save capabilities
+- **Persona System**: Comprehensive persona management with versioning
+  - CRUD operations for persona configurations
+  - Version control and history tracking
+- **Conversation Management**: Advanced conversation and message handling
+  - Title and context editing
+  - Soft delete with propagation to history messages
+  - Message threading and organization
+
+### 🤖 **Automation & Monitoring**
+- **Councilor System**: Automated agent monitoring and execution
+  - Backend scheduler for periodic agent runs
+  - Real-time WebSocket updates for councilor status
+  - Agent statistics tracking and reporting
+- **Portfolio Management**: Portfolio chat routing with rate limiting
+- **Gamification**: Task events endpoint for historical gamification data
+
 ### 🏗 **Production Architecture**
 - **FastAPI Framework**: High-performance async API with automatic OpenAPI docs
+- **MongoDB Integration**: Robust document storage with Motor async driver
 - **Poetry Dependency Management**: Modern Python packaging with lock files
 - **Docker Support**: Multi-stage builds with health checks
 - **Configuration Management**: YAML-based config with environment overrides
+- **Multi-Provider AI Support**: OpenAI, Anthropic, Groq, Fireworks AI, Ollama, and Gemini
 
 ### 🧪 **Quality Assurance**
 - **Comprehensive Testing**: 52+ test cases covering unit, integration, and API testing
@@ -85,8 +110,11 @@ docker run -p 5006:5006 -p 8006:8006 conductor-gateway
 | `PORT` | API server port | `5006` |
 | `MCP_PORT` | MCP server port | `8006` |
 | `CONDUCTOR_PROJECT_PATH` | Path to Conductor project | `/path/to/conductor` |
-| `CONDUCTOR_TIMEOUT` | Command execution timeout | `300` |
+| `CONDUCTOR_TIMEOUT` | Command execution timeout | `600` (10 minutes) |
+| `MONGODB_URI` | MongoDB connection string | `mongodb://localhost:27017` |
+| `MONGODB_DB_NAME` | MongoDB database name | `conductor_gateway` |
 | `OPENAI_API_KEY` | OpenAI API key for LLM | Required for agent execution |
+| `AI_PROVIDER` | AI provider selection | `openai` (options: openai, anthropic, groq, fireworks, ollama, gemini) |
 
 ### Configuration File
 
@@ -105,6 +133,19 @@ conductor:
 ```
 
 ## 🔌 API Usage
+
+### API Endpoints Overview
+
+The gateway provides multiple routers for different functionalities:
+
+- `/api/agents` - Agent instance management and execution
+- `/api/screenplays` - Screenplay CRUD operations and validation
+- `/api/personas` - Persona management
+- `/api/persona-versions` - Persona version control
+- `/api/councilor` - Automated monitoring and scheduling
+- `/api/portfolio` - Portfolio chat management
+- `/api/conversations` - Conversation and message management
+- `/api/v1/tasks/events` - Gamification task events
 
 ### Health Check
 
@@ -241,19 +282,43 @@ poetry run pre-commit install
 conductor-gateway/
 ├── src/                        # Source code
 │   ├── api/                   # FastAPI application
-│   ├── config/                # Configuration management
-│   ├── server/                # MCP server implementation
-│   ├── tools/                 # Conductor CLI tools
-│   └── utils/                 # Utility functions
-├── tests/                     # Test suite
-│   ├── unit/                  # Unit tests
-│   ├── integration/           # Integration tests
-│   └── conftest.py           # Test configuration
-├── .github/                   # GitHub Actions workflows
-├── docs/                      # Documentation
-├── pyproject.toml            # Project configuration
-├── Dockerfile                # Container definition
-└── docker-compose.yml       # Development environment
+│   │   ├── routers/          # API route handlers
+│   │   │   ├── agents.py    # Agent instance management
+│   │   │   ├── screenplays.py # Screenplay operations
+│   │   │   ├── persona.py   # Persona management
+│   │   │   ├── persona_version.py # Version control
+│   │   │   ├── councilor.py # Automated monitoring
+│   │   │   ├── portfolio.py # Portfolio chat
+│   │   │   └── conversations.py # Conversation management
+│   │   ├── app.py            # Main application
+│   │   ├── models.py         # Pydantic models
+│   │   └── websocket.py      # WebSocket handlers
+│   ├── clients/              # External service clients
+│   │   └── conductor_client.py # Conductor API client
+│   ├── config/               # Configuration management
+│   ├── core/                 # Core functionality
+│   │   └── database.py       # MongoDB connection
+│   ├── models/               # Data models
+│   │   ├── screenplay.py    # Screenplay models
+│   │   ├── persona.py       # Persona models
+│   │   ├── persona_version.py # Version models
+│   │   └── councilor.py     # Councilor models
+│   ├── services/             # Business logic
+│   │   ├── screenplay_service.py
+│   │   ├── councilor_service.py
+│   │   └── councilor_scheduler.py
+│   ├── server/               # MCP server implementation
+│   ├── tools/                # Conductor CLI tools
+│   └── utils/                # Utility functions
+├── tests/                    # Test suite
+│   ├── unit/                 # Unit tests
+│   ├── integration/          # Integration tests
+│   └── conftest.py          # Test configuration
+├── .github/                  # GitHub Actions workflows
+├── docs/                     # Documentation
+├── pyproject.toml           # Project configuration
+├── Dockerfile               # Container definition
+└── docker-compose.yml      # Development environment
 ```
 
 ## 🔧 MCP Tools Available
@@ -341,12 +406,24 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 - **Discussions**: [GitHub Discussions](https://github.com/primoia/conductor-gateway/discussions)
 - **Documentation**: [Project Docs](docs/)
 
+## 🎯 Key Technologies
+
+- **[FastAPI](https://fastapi.tiangolo.com/)** - High-performance async web framework
+- **[MongoDB](https://www.mongodb.com/)** - Document database with Motor async driver
+- **[Poetry](https://python-poetry.org/)** - Modern Python dependency management
+- **[MCP](https://modelcontextprotocol.io/)** - Model Context Protocol for tool integration
+- **[APScheduler](https://apscheduler.readthedocs.io/)** - Advanced Python scheduler
+- **[Ruff](https://docs.astral.sh/ruff/)** - Fast Python linter and formatter
+- **[MyPy](https://mypy.readthedocs.io/)** - Static type checking
+- **[Pytest](https://pytest.org/)** - Testing framework
+
 ## 🙏 Acknowledgments
 
 - Built with [FastAPI](https://fastapi.tiangolo.com/) for high-performance async APIs
 - Uses [Poetry](https://python-poetry.org/) for modern Python dependency management
 - Powered by [MCP](https://modelcontextprotocol.io/) for extensible tool integration
 - Quality assured with [Ruff](https://docs.astral.sh/ruff/), [MyPy](https://mypy.readthedocs.io/), and [Pytest](https://pytest.org/)
+- Database powered by [MongoDB](https://www.mongodb.com/) for flexible document storage
 
 ---
 

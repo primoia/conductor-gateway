@@ -222,9 +222,20 @@ class CouncilorBackendScheduler:
 
         try:
             # Execute agent via Conductor API
+            # Conductor API will:
+            # 1. Build the complete prompt using PromptEngine (persona, screenplay, playbook, history, user input)
+            # 2. Insert task into MongoDB tasks collection with the complete prompt
+            # 3. Wait for watcher to execute via LLM
+            # 4. Return the result
+            prompt_text = task.get("prompt", "Analyze the project and provide insights")
+
+            logger.info(f"🔍 [COUNCILOR] Calling Conductor API for {agent_id}")
+            logger.info(f"   - Input text: {prompt_text[:100]}...")
+            logger.info(f"   - Conductor will build full prompt with PromptEngine")
+
             result = await self.conductor_client.execute_agent(
                 agent_name=agent_id,
-                prompt=task.get("prompt", "Analyze the project and provide insights"),
+                prompt=prompt_text,  # ← This is just user input, Conductor will build full prompt
                 instance_id=f"councilor_{agent_id}_{int(start_time.timestamp() * 1000)}",
                 context_mode="stateless",
                 timeout=600
@@ -237,24 +248,14 @@ class CouncilorBackendScheduler:
             output = result.get("result", "") if isinstance(result, dict) else str(result)
             severity = self._analyze_severity(output)
 
-            # Save execution result to tasks collection
-            await self.tasks_collection.insert_one({
-                "task_id": execution_id,
-                "agent_id": agent_id,
-                "instance_id": f"councilor_{agent_id}_{int(start_time.timestamp() * 1000)}",
-                "is_councilor_execution": True,  # Flag to identify councilor tasks
-                "councilor_config": {
-                    "task_name": task_name,
-                    "display_name": display_name
-                },
-                "status": "completed",
-                "severity": severity,
-                "result": output,
-                "error": None,
-                "created_at": start_time,
-                "completed_at": end_time,
-                "duration": (end_time - start_time).total_seconds()
-            })
+            logger.info(f"✅ [COUNCILOR] Execution completed for {agent_id}")
+            logger.info(f"   - Severity: {severity}")
+            logger.info(f"   - Duration: {duration_ms}ms")
+            logger.info(f"   - Note: Task already saved in MongoDB by Conductor API with full prompt")
+
+            # NOTE: We don't insert to tasks collection here anymore!
+            # The Conductor API already inserted the task with the COMPLETE prompt from PromptEngine.
+            # Inserting again would create a duplicate with wrong prompt.
 
             # Update agent statistics
             await self._update_agent_stats(agent_id, severity == "success")
@@ -298,6 +299,7 @@ class CouncilorBackendScheduler:
                     "task_name": task_name,
                     "display_name": display_name
                 },
+                "prompt": prompt_text,  # ← NOVO: Salva o prompt usado (mesmo em caso de erro)
                 "status": "error",
                 "severity": "error",
                 "result": None,

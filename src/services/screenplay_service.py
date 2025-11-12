@@ -97,10 +97,11 @@ class ScreenplayService:
             logger.warning(f"Index creation warning (may already exist): {e}")
 
     def create_screenplay(
-        self, 
-        name: str, 
-        description: Optional[str] = None, 
-        tags: Optional[list[str]] = None, 
+        self,
+        name: str,
+        description: Optional[str] = None,
+        tags: Optional[list[str]] = None,
+        working_directory: Optional[str] = None,
         file_path: Optional[str] = None,
         import_path: Optional[str] = None,
         export_path: Optional[str] = None,
@@ -113,6 +114,7 @@ class ScreenplayService:
             name: Unique screenplay name
             description: Optional description
             tags: Optional list of tags
+            working_directory: Optional default working directory for agents
             file_path: Optional full path to the markdown file on disk
             import_path: Optional path from which the screenplay was imported
             export_path: Optional last path where the screenplay was exported
@@ -172,6 +174,7 @@ class ScreenplayService:
             "description": description or "",
             "tags": tags or [],
             "content": content,
+            "workingDirectory": working_directory,
             "filePath": file_path,
             "importPath": import_path,
             "exportPath": export_path,
@@ -355,6 +358,7 @@ class ScreenplayService:
         description: Optional[str] = None,
         tags: Optional[list[str]] = None,
         content: Optional[str] = None,
+        working_directory: Optional[str] = None,
         file_path: Optional[str] = None,
         import_path: Optional[str] = None,
         export_path: Optional[str] = None,
@@ -369,6 +373,7 @@ class ScreenplayService:
             description: Optional new description
             tags: Optional new tags
             content: Optional new content
+            working_directory: Optional new working directory
             file_path: Optional new file path
             import_path: Optional new import path
             export_path: Optional new export path
@@ -414,6 +419,9 @@ class ScreenplayService:
             update_doc["$set"]["content"] = content
             # Update content hash for duplicate detection
             update_doc["$set"]["contentHash"] = generate_content_hash(content)
+
+        if working_directory is not None:
+            update_doc["$set"]["workingDirectory"] = working_directory
 
         # Validate and update file paths using middleware
         if file_path is not None or import_path is not None or export_path is not None:
@@ -577,13 +585,12 @@ class ScreenplayService:
             return False
 
         # Update working directory
-        from datetime import datetime
         result = self.collection.update_one(
             {"_id": obj_id},
             {
                 "$set": {
-                    "working_directory": working_directory,
-                    "updatedAt": datetime.now().isoformat()
+                    "workingDirectory": working_directory,
+                    "updatedAt": datetime.now(UTC)
                 }
             }
         )
