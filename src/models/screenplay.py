@@ -134,6 +134,12 @@ class ScreenplayUpdate(BaseModel):
         validation_alias=AliasChoices("exportPath", "export_path"),
     )
     is_deleted: Optional[bool] = Field(None, alias="isDeleted", description="Soft delete flag")
+    increment_version: bool = Field(
+        False,
+        alias="incrementVersion",
+        validation_alias=AliasChoices("incrementVersion", "increment_version"),
+        description="Whether to increment version number (default False for autosave)",
+    )
 
     model_config = ConfigDict(
         populate_by_name=True,

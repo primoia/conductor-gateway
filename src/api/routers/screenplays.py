@@ -225,17 +225,21 @@ async def get_screenplay(screenplay_id: str):
 @router.put("/{screenplay_id}", response_model=ScreenplayResponse)
 async def update_screenplay(screenplay_id: str, data: ScreenplayUpdate):
     """
-    Update a screenplay and increment its version.
+    Update a screenplay and optionally increment its version.
 
     Args:
         screenplay_id: Screenplay ID
-        data: Fields to update (name, description, tags, content)
+        data: Fields to update (name, description, tags, content, increment_version)
 
     Returns:
         Updated screenplay document
 
     Raises:
         HTTPException: If screenplay not found, name conflict, or service unavailable
+
+    Note:
+        By default, version is NOT incremented (autosave). Set increment_version=true
+        for explicit saves that should increment the version.
     """
     service = get_service()
 
@@ -251,6 +255,7 @@ async def update_screenplay(screenplay_id: str, data: ScreenplayUpdate):
             import_path=data.import_path,
             export_path=data.export_path,
             is_deleted=data.is_deleted,
+            increment_version=data.increment_version,
         )
 
         if not document:

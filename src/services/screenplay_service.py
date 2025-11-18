@@ -363,9 +363,10 @@ class ScreenplayService:
         import_path: Optional[str] = None,
         export_path: Optional[str] = None,
         is_deleted: Optional[bool] = None,
+        increment_version: bool = False,
     ) -> Optional[dict]:
         """
-        Update a screenplay and increment its version.
+        Update a screenplay and optionally increment its version.
 
         Args:
             screenplay_id: Screenplay ID
@@ -378,6 +379,7 @@ class ScreenplayService:
             import_path: Optional new import path
             export_path: Optional new export path
             is_deleted: Optional soft delete flag
+            increment_version: Whether to increment version (default False for autosave)
 
         Returns:
             Updated screenplay document or None if not found
@@ -397,8 +399,10 @@ class ScreenplayService:
             logger.warning(f"Screenplay not found for update: {screenplay_id}")
             return None
 
-        # Build update document
-        update_doc = {"$set": {"updatedAt": datetime.now(UTC)}, "$inc": {"version": 1}}
+        # Build update document - only increment version if explicitly requested
+        update_doc = {"$set": {"updatedAt": datetime.now(UTC)}}
+        if increment_version:
+            update_doc["$inc"] = {"version": 1}
 
         if name is not None:
             # Validate name using middleware (duplicates allowed)
