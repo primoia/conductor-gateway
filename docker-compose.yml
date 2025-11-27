@@ -4,8 +4,11 @@ services:
   conductor-gateway:
     build: .
     ports:
-      - "5006:5006"
-      - "8006:8006"
+      - "5006:5006"   # BFF API
+      - "5007:5007"   # MCP Prospector (SSE)
+      - "5008:5008"   # MCP Database (SSE)
+      - "5009:5009"   # MCP Conductor (SSE)
+      - "8006:8006"   # Legacy MCP (deprecated)
     volumes:
       - ./src:/app/src
       - ./config.yaml:/app/config.yaml:ro
@@ -13,6 +16,9 @@ services:
       - HOST=0.0.0.0
       - PORT=5006
       - MCP_PORT=8006
+      - MCP_PROSPECTOR_PORT=5007
+      - MCP_DATABASE_PORT=5008
+      - MCP_CONDUCTOR_PORT=5009
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:5006/health"]

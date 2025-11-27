@@ -36,8 +36,12 @@ from src.clients.conductor_client import ConductorClient
 from src.config.settings import CONDUCTOR_CONFIG, MONGODB_CONFIG, SERVER_CONFIG
 from src.utils.mcp_utils import init_agent
 from src.services.councilor_scheduler import CouncilorBackendScheduler
+from src.mcps.mcp_manager import MCPManager
 
 logger = logging.getLogger(__name__)
+
+# Global MCP Manager instance
+mcp_manager = MCPManager()
 
 # SSE Stream Manager - Global dictionary to manage active streams
 ACTIVE_STREAMS: dict[str, asyncio.Queue] = {}
@@ -67,16 +71,29 @@ def mongo_to_dict(item: dict) -> dict:
     return item
 
 
-def start_mcp_server():
-    """Starts MCP server in a separate thread."""
+def start_mcp_servers():
+    """Starts all MCP servers using MCPManager."""
     try:
-        logger.info("Starting MCP server thread...")
+        logger.info("Starting MCP servers via MCPManager...")
+        results = mcp_manager.start_all()
+
+        # Log results
+        for name, success in results.items():
+            if success:
+                logger.info(f"  MCP '{name}' started successfully")
+            else:
+                logger.error(f"  MCP '{name}' failed to start")
+
+        # Also start the legacy MCP server on mcp_port (8006) for backward compatibility
+        # This will be deprecated in the future
+        logger.info(f"Starting legacy MCP server on port {SERVER_CONFIG['mcp_port']}...")
         from src.server.advanced_server import ConductorAdvancedMCPServer
 
-        server = ConductorAdvancedMCPServer(port=SERVER_CONFIG["mcp_port"])
-        server.run(transport="sse")
+        legacy_server = ConductorAdvancedMCPServer(port=SERVER_CONFIG["mcp_port"])
+        legacy_server.run(transport="sse")
+
     except Exception as e:
-        logger.error(f"Failed to start MCP server: {e}", exc_info=True)
+        logger.error(f"Failed to start MCP servers: {e}", exc_info=True)
 
 
 async def run_agent_with_queue(job_id: str, payload: dict[str, Any], queue: asyncio.Queue):
@@ -406,8 +423,9 @@ async def lifespan(app: FastAPI):
             logger.error(f"❌ Failed to start Councilor Scheduler: {e}")
             councilor_scheduler = None
 
-    # Start MCP server in daemon thread
-    mcp_thread = threading.Thread(target=start_mcp_server, daemon=True, name="MCP-Server-Thread")
+    # Start MCP servers in daemon thread
+    # This starts all new MCPs (5007-5009) plus legacy MCP (8006)
+    mcp_thread = threading.Thread(target=start_mcp_servers, daemon=True, name="MCP-Servers-Thread")
     mcp_thread.start()
 
     # Give MCP server time to start
@@ -793,6 +811,25 @@ def create_app() -> FastAPI:
                 "websocket_gamification": f"ws://{SERVER_CONFIG['host']}:{SERVER_CONFIG['port']}/ws/gamification",
             },
         }
+
+    @app.get("/mcps/status")
+    async def mcp_status():
+        """Get status of all MCP servers."""
+        return {
+            "status": "ok",
+            "mcps": mcp_manager.get_status(),
+            "mcp_config": mcp_manager.generate_mcp_config(host="localhost"),
+        }
+
+    @app.get("/mcps/config")
+    async def mcp_config(host: str = Query(default="localhost", description="Host to use in MCP URLs")):
+        """
+        Get MCP config JSON for Claude CLI.
+
+        Use this endpoint to generate the --mcp-config JSON for Claude CLI.
+        Pass host=gateway for Docker network or host=localhost for local dev.
+        """
+        return mcp_manager.generate_mcp_config(host=host)
 
     # WebSocket Endpoints
 
