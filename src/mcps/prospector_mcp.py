@@ -29,11 +29,17 @@ class ProspectorMCP(BaseMCPServer):
     - extract_contacts → POST /scrape {action: "extract"}
     - get_health → GET /health
     - get_metrics → GET /metrics
+
+    Offline LinkedIn processing (via Puppeteer):
+    - list_inbox → GET /inbox
+    - scrape_local → POST /scrape-local
+    - process_inbox → POST /process-inbox
     """
 
     def __init__(self, port: int | None = None):
         config = MCP_REGISTRY["prospector"]
         self.target_url = config["target_url"]
+        self.puppeteer_url = config.get("puppeteer_url", "http://primoia-prospector-puppeteer:3001")
         super().__init__(
             name="prospector",
             port=port or config["port"],
@@ -125,7 +131,55 @@ class ProspectorMCP(BaseMCPServer):
         async def get_prospector_metrics() -> dict[str, Any]:
             return await self._call_api("/metrics", method="GET")
 
-        logger.info("Prospector MCP tools registered")
+        # Offline LinkedIn processing tools
+        @self.mcp.tool(
+            name="list_inbox",
+            description="""List HTML files in the offline inbox folder waiting to be processed.
+            Use this to see LinkedIn pages saved by the user.
+
+            Returns list of files with name, path, size and modification date.""",
+        )
+        async def list_inbox() -> dict[str, Any]:
+            return await self._call_puppeteer("/inbox", method="GET")
+
+        @self.mcp.tool(
+            name="scrape_local",
+            description="""Process a single local HTML file (offline mode).
+            Extract LinkedIn profile or company data from a saved page.
+
+            Parameters:
+            - file_path: Full path to the HTML file inside the container
+                        (e.g., /data/linkedin-offline/inbox/profile.html)
+            - extract_type: Type of extraction to perform
+                           Options: linkedin, linkedin-profile, linkedin-company, generic
+                           Default: linkedin
+
+            Returns extracted data including name, headline, contacts, etc.""",
+        )
+        async def scrape_local(
+            file_path: str,
+            extract_type: str = "linkedin",
+        ) -> dict[str, Any]:
+            return await self._call_puppeteer(
+                "/scrape-local",
+                method="POST",
+                data={"file_path": file_path, "extract_type": extract_type},
+            )
+
+        @self.mcp.tool(
+            name="process_inbox",
+            description="""Process ALL HTML files in the offline inbox folder.
+            Extracts data from each file and moves them to processed/ or failed/ folders.
+
+            Use this when the user has saved multiple LinkedIn pages and wants to
+            process them all at once.
+
+            Returns summary with processed count, success/failure counts, and extracted data.""",
+        )
+        async def process_inbox() -> dict[str, Any]:
+            return await self._call_puppeteer("/process-inbox", method="POST")
+
+        logger.info("Prospector MCP tools registered (including offline processing)")
 
     async def _call_scrape(self, data: dict) -> dict[str, Any]:
         """Call the Prospector /scrape endpoint."""
@@ -170,6 +224,48 @@ class ProspectorMCP(BaseMCPServer):
 
         except httpx.RequestError as e:
             error_msg = f"Failed to connect to Prospector: {e}"
+            logger.error(error_msg)
+            return {"error": error_msg}
+
+    async def _call_puppeteer(
+        self,
+        endpoint: str,
+        method: str = "GET",
+        data: dict | None = None,
+    ) -> dict[str, Any]:
+        """Make an async request to the Puppeteer service for offline operations."""
+        url = f"{self.puppeteer_url}{endpoint}"
+
+        try:
+            async with httpx.AsyncClient(timeout=120.0) as client:
+                logger.info(f"Calling Puppeteer API: {method} {url}")
+
+                if method == "POST":
+                    response = await client.post(url, json=data or {})
+                elif method == "GET":
+                    response = await client.get(url)
+                else:
+                    raise ValueError(f"Unsupported HTTP method: {method}")
+
+                response.raise_for_status()
+                result = response.json()
+
+                logger.info(f"Puppeteer API response: {response.status_code}")
+                return result
+
+        except httpx.HTTPStatusError as e:
+            error_msg = f"Puppeteer API error: {e.response.status_code}"
+            try:
+                error_data = e.response.json()
+                error_msg = error_data.get("error", error_msg)
+            except Exception:
+                error_msg = e.response.text or error_msg
+
+            logger.error(f"Puppeteer API error: {error_msg}")
+            return {"error": error_msg, "status_code": e.response.status_code}
+
+        except httpx.RequestError as e:
+            error_msg = f"Failed to connect to Puppeteer: {e}"
             logger.error(error_msg)
             return {"error": error_msg}
 

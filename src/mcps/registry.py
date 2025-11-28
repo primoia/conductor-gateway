@@ -9,10 +9,11 @@ import os
 from typing import TypedDict
 
 
-class MCPConfig(TypedDict):
+class MCPConfig(TypedDict, total=False):
     port: int
     description: str
     target_url: str | None  # None for internal services like database
+    puppeteer_url: str | None  # For Prospector offline operations
 
 
 # MCP Registry - Single source of truth for all MCP configurations
@@ -22,6 +23,7 @@ MCP_REGISTRY: dict[str, MCPConfig] = {
         "port": int(os.getenv("MCP_PROSPECTOR_PORT", "5007")),
         "description": "Web scraping and contact extraction",
         "target_url": os.getenv("PROSPECTOR_URL", "http://prospector-orchestrator:8081"),
+        "puppeteer_url": os.getenv("PUPPETEER_URL", "http://primoia-prospector-puppeteer:3001"),
     },
     "database": {
         "port": int(os.getenv("MCP_DATABASE_PORT", "5008")),
