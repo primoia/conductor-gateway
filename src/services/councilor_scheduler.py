@@ -370,6 +370,17 @@ class CouncilorBackendScheduler:
             # Update instance statistics
             await self._update_instance_stats(instance_id, exit_code == 0, duration_ms)
 
+            # 💬 Save messages to conversation (same as user flow)
+            # This makes councilor executions visible in the chat
+            await self._save_to_conversation(
+                conversation_id=conversation_id,
+                user_input=prompt_text,
+                agent_response=output,
+                agent_id=agent_id,
+                instance_id=instance_id,
+                display_name=display_name
+            )
+
             # 🔔 Emit "councilor_completed" event via WebSocket with all IDs
             try:
                 from src.api.websocket import gamification_manager
@@ -505,6 +516,70 @@ class CouncilorBackendScheduler:
 
         except Exception as e:
             logger.warning(f"⚠️ Failed to update statistics for instance {instance_id}: {e}")
+
+    async def _save_to_conversation(
+        self,
+        conversation_id: str,
+        user_input: str,
+        agent_response: str,
+        agent_id: str,
+        instance_id: str,
+        display_name: str
+    ):
+        """
+        Save councilor execution messages to conversation.
+
+        This makes councilor executions visible in the chat,
+        same as user messages.
+
+        Args:
+            conversation_id: ID of the conversation
+            user_input: The prompt/input sent to the agent
+            agent_response: The agent's response
+            agent_id: ID of the agent template
+            instance_id: ID of the councilor instance
+            display_name: Display name of the councilor
+        """
+        if not conversation_id:
+            logger.warning(f"⚠️ Cannot save to conversation: conversation_id is None")
+            return
+
+        try:
+            import httpx
+            import os
+
+            # Get Conductor API URL (conversations are managed by conductor-api)
+            conductor_api_url = os.getenv("CONDUCTOR_API_URL", "http://primoia-conductor-api:8000")
+
+            # Build agent_info for the message
+            agent_info = {
+                "agent_id": agent_id,
+                "instance_id": instance_id,
+                "name": display_name,
+                "emoji": "🏛️"  # Councilor emoji
+            }
+
+            # Payload for adding message (same structure as frontend)
+            payload = {
+                "user_input": f"🏛️ [Execução Agendada] {user_input}",
+                "agent_response": agent_response,
+                "agent_info": agent_info
+            }
+
+            logger.info(f"💬 [COUNCILOR] Saving messages to conversation {conversation_id}")
+
+            async with httpx.AsyncClient(timeout=30) as client:
+                response = await client.post(
+                    f"{conductor_api_url}/conversations/{conversation_id}/messages",
+                    json=payload
+                )
+                response.raise_for_status()
+
+            logger.info(f"✅ [COUNCILOR] Messages saved to conversation {conversation_id}")
+
+        except Exception as e:
+            # Don't fail the execution if saving to conversation fails
+            logger.warning(f"⚠️ Failed to save messages to conversation: {e}")
 
     def _parse_interval_trigger(self, value: str) -> IntervalTrigger:
         """

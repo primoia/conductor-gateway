@@ -481,6 +481,98 @@ async def demote_councilor_instance(
         )
 
 
+@router.patch(
+    "/instances/{instance_id}/schedule",
+    response_model=ScheduleResponse,
+    status_code=status.HTTP_200_OK
+)
+async def update_instance_schedule(
+    instance_id: str = Path(..., description="Instance ID of the councilor"),
+    request: UpdateScheduleRequest = ...,
+    db: AsyncIOMotorDatabase = Depends(get_database),
+    scheduler: Optional[CouncilorBackendScheduler] = Depends(get_councilor_scheduler)
+):
+    """
+    Pause or resume a councilor instance schedule.
+
+    **Path Parameters:**
+    - `instance_id`: Instance ID of the councilor
+
+    **Request Body:**
+    - `enabled`: true to resume, false to pause
+
+    **Returns:**
+    - Updated schedule configuration
+    """
+    try:
+        logger.info(f"⏯️ [SCHEDULE] Updating schedule for instance: {instance_id}, enabled={request.enabled}")
+
+        agent_instances = db.agent_instances
+
+        # Find instance
+        instance = await agent_instances.find_one({"instance_id": instance_id})
+
+        if not instance:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Councilor instance '{instance_id}' not found"
+            )
+
+        if not instance.get("is_councilor_instance"):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Instance '{instance_id}' is not a councilor"
+            )
+
+        # Update schedule enabled flag
+        from datetime import datetime
+        await agent_instances.update_one(
+            {"instance_id": instance_id},
+            {
+                "$set": {
+                    "councilor_config.schedule.enabled": request.enabled,
+                    "updated_at": datetime.utcnow().isoformat()
+                }
+            }
+        )
+
+        # Update scheduler if available
+        if scheduler:
+            try:
+                if request.enabled:
+                    # Reload councilor into scheduler
+                    await scheduler.reload_councilors()
+                    logger.info(f"▶️ [SCHEDULE] Resumed instance '{instance_id}' in scheduler")
+                else:
+                    # Remove from scheduler (pause)
+                    job_id = f"councilor_instance_{instance_id}"
+                    scheduler.scheduler.remove_job(job_id, jobstore='default')
+                    logger.info(f"⏸️ [SCHEDULE] Paused instance '{instance_id}' in scheduler")
+            except Exception as e:
+                logger.warning(f"⚠️ [SCHEDULE] Scheduler update failed: {e}")
+
+        # Get updated schedule
+        updated_instance = await agent_instances.find_one({"instance_id": instance_id})
+        updated_schedule = updated_instance.get("councilor_config", {}).get("schedule", {})
+
+        logger.info(f"✅ [SCHEDULE] Instance '{instance_id}' schedule updated: enabled={request.enabled}")
+
+        return ScheduleResponse(
+            success=True,
+            message=f"Schedule {'resumed' if request.enabled else 'paused'} successfully",
+            schedule=CouncilorSchedule(**updated_schedule)
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ [SCHEDULE] Error updating schedule: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to update schedule: {str(e)}"
+        )
+
+
 # ========== Legacy List Endpoints ==========
 
 @router.get("", response_model=AgentListResponse)
