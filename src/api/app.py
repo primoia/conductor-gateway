@@ -905,6 +905,73 @@ def create_app() -> FastAPI:
         finally:
             gamification_manager.disconnect(client_id)
 
+    # Internal Event Endpoints (for Watcher to emit events)
+
+    @app.post("/api/internal/task-event")
+    async def receive_task_event(payload: dict[str, Any]):
+        """
+        Internal endpoint for the Watcher to emit task events.
+        Broadcasts events to all connected WebSocket clients.
+
+        Event types:
+        - task_started: Task execution started (status: processing)
+        - task_completed: Task execution completed (status: completed)
+        - task_error: Task execution failed (status: error)
+
+        Payload structure:
+        {
+            "type": "task_started" | "task_completed" | "task_error",
+            "data": {
+                "task_id": "string",
+                "agent_id": "string",
+                "agent_name": "string",
+                "agent_emoji": "string",
+                "instance_id": "string",
+                "conversation_id": "string",
+                "screenplay_id": "string",
+                "status": "pending" | "processing" | "completed" | "error",
+                "duration_ms": number (optional),
+                "exit_code": number (optional),
+                "result_summary": "string" (optional, first 200 chars),
+                "timestamp": "ISO string"
+            }
+        }
+        """
+        try:
+            event_type = payload.get("type")
+            event_data = payload.get("data", {})
+
+            if not event_type:
+                raise HTTPException(status_code=400, detail="Missing 'type' field")
+
+            # Validate event type
+            valid_types = ["task_started", "task_completed", "task_error"]
+            if event_type not in valid_types:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Invalid event type. Must be one of: {valid_types}"
+                )
+
+            # Log the event
+            agent_name = event_data.get("agent_name", event_data.get("agent_id", "unknown"))
+            status = event_data.get("status", "unknown")
+            logger.info(f"📡 [TASK-EVENT] Received {event_type} for {agent_name} (status: {status})")
+
+            # Broadcast to all WebSocket clients
+            await gamification_manager.broadcast(event_type, event_data)
+
+            return {
+                "success": True,
+                "message": f"Event {event_type} broadcasted",
+                "clients_count": len(gamification_manager.active_connections)
+            }
+
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Error processing task event: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail=str(e))
+
     # Agent Management Endpoints
 
     @app.get("/api/agents")
