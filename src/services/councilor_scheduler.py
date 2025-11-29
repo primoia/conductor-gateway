@@ -71,22 +71,52 @@ class CouncilorBackendScheduler:
     async def load_councilors(self):
         """Load all active councilors from database and schedule their tasks"""
         try:
-            # Find all councilors with enabled schedules
+            # ============================================================
+            # NEW: Load from agent_instances (is_councilor_instance=True)
+            # ============================================================
+            agent_instances = self.db.agent_instances
+            instances_cursor = agent_instances.find({
+                "is_councilor_instance": True,
+                "councilor_config.schedule.enabled": True,
+                "$or": [
+                    {"isDeleted": {"$ne": True}},
+                    {"isDeleted": {"$exists": False}}
+                ]
+            })
+
+            councilor_instances = await instances_cursor.to_list(length=None)
+            logger.info(f"📋 Loading {len(councilor_instances)} councilor instances from agent_instances")
+
+            for instance in councilor_instances:
+                try:
+                    await self.schedule_councilor_instance(instance)
+                except Exception as e:
+                    instance_id = instance.get("instance_id", "unknown")
+                    logger.error(f"❌ Failed to schedule councilor instance {instance_id}: {e}")
+
+            # ============================================================
+            # LEGACY: Also load from agents (is_councilor=True) for backwards compatibility
+            # This will be deprecated once all councilors are migrated to instances
+            # ============================================================
             cursor = self.agents_collection.find({
                 "is_councilor": True,
                 "councilor_config.schedule.enabled": True
             })
 
-            councilors = await cursor.to_list(length=None)
+            legacy_councilors = await cursor.to_list(length=None)
 
-            logger.info(f"📋 Loading {len(councilors)} active councilors")
+            if legacy_councilors:
+                logger.info(f"📋 Loading {len(legacy_councilors)} legacy councilors from agents collection")
 
-            for councilor in councilors:
-                try:
-                    await self.schedule_councilor(councilor)
-                except Exception as e:
-                    agent_id = councilor.get("agent_id", "unknown")
-                    logger.error(f"❌ Failed to schedule councilor {agent_id}: {e}")
+                for councilor in legacy_councilors:
+                    try:
+                        await self.schedule_councilor(councilor)
+                    except Exception as e:
+                        agent_id = councilor.get("agent_id", "unknown")
+                        logger.error(f"❌ Failed to schedule legacy councilor {agent_id}: {e}")
+
+            total = len(councilor_instances) + len(legacy_councilors)
+            logger.info(f"✅ Loaded {total} total councilors ({len(councilor_instances)} instances, {len(legacy_councilors)} legacy)")
 
         except Exception as e:
             logger.error(f"❌ Failed to load councilors: {e}")
@@ -154,6 +184,327 @@ class CouncilorBackendScheduler:
 
         except Exception as e:
             logger.error(f"❌ Failed to create trigger for {agent_id}: {e}")
+
+    async def schedule_councilor_instance(self, instance: dict):
+        """
+        Schedule a councilor instance task (NEW instance-based approach).
+
+        Args:
+            instance: Agent instance document from MongoDB with councilor_config
+        """
+        instance_id = instance.get("instance_id")
+        agent_id = instance.get("agent_id")
+        screenplay_id = instance.get("screenplay_id")
+        conversation_id = instance.get("conversation_id")
+        config = instance.get("councilor_config")
+        customization = instance.get("customization", {})
+
+        if not config:
+            logger.warning(f"⚠️ Councilor instance {instance_id} has no config, skipping")
+            return
+
+        schedule = config.get("schedule", {})
+
+        if not schedule.get("enabled"):
+            logger.info(f"⏸️ Councilor instance {instance_id} schedule is disabled, skipping")
+            return
+
+        # Use instance_id as job ID for uniqueness
+        job_id = instance_id or agent_id
+
+        # Remove existing job if exists (to update it)
+        try:
+            self.scheduler.remove_job(job_id, jobstore='default')
+            logger.debug(f"Removed existing job for {job_id}")
+        except Exception:
+            pass  # Job doesn't exist, that's fine
+
+        # Create trigger based on schedule type
+        try:
+            if schedule["type"] == "interval":
+                trigger = self._parse_interval_trigger(schedule["value"])
+            elif schedule["type"] == "cron":
+                trigger = CronTrigger.from_crontab(schedule["value"])
+            else:
+                logger.error(f"❌ Unknown schedule type: {schedule['type']}")
+                return
+
+            # Get display name
+            display_name = customization.get("display_name") if customization else None
+            if not display_name:
+                # Try to get from agent template
+                agent = await self.agents_collection.find_one({"agent_id": agent_id})
+                display_name = agent.get("definition", {}).get("name", agent_id) if agent else agent_id
+
+            # Add job to scheduler with full instance data
+            self.scheduler.add_job(
+                func=self._execute_councilor_instance_task,
+                trigger=trigger,
+                id=job_id,
+                name=f"Councilor Instance: {display_name}",
+                kwargs={
+                    'instance': instance  # Pass full instance with all IDs
+                },
+                replace_existing=True,
+                jobstore='default'
+            )
+
+            logger.info(
+                f"⏰ Scheduled instance: {instance_id} ({agent_id}) - "
+                f"{schedule['type']}={schedule['value']}"
+            )
+
+        except Exception as e:
+            logger.error(f"❌ Failed to create trigger for instance {instance_id}: {e}")
+
+    async def _execute_councilor_instance_task(self, instance: dict):
+        """
+        Execute a councilor instance task (NEW instance-based approach).
+
+        This method uses the SAME FLOW as user chat:
+        1. Generate task_id
+        2. Call Conductor API /agents/{agent_id}/execute (which inserts into tasks collection)
+        3. Watcher picks up task and executes
+        4. Conductor API polls and returns result
+
+        This ensures councilor executions appear in the tasks table.
+
+        Args:
+            instance: Full instance document with all IDs
+        """
+        import httpx
+        import os
+        from bson import ObjectId
+
+        instance_id = instance.get("instance_id")
+        agent_id = instance.get("agent_id")
+        screenplay_id = instance.get("screenplay_id")
+        conversation_id = instance.get("conversation_id")
+        config = instance.get("councilor_config", {})
+        customization = instance.get("customization", {})
+        cwd = instance.get("cwd")  # Working directory for execution
+
+        task = config.get("task", {})
+        display_name = customization.get("display_name") if customization else agent_id
+        task_name = task.get("name", "Unknown Task")
+
+        start_time = datetime.utcnow()
+        execution_id = f"exec_{instance_id}_{int(start_time.timestamp() * 1000)}"
+        task_id = str(ObjectId())  # Generate task_id like gateway does
+
+        logger.info(f"🔎 Executing councilor instance task: {display_name} ({instance_id})")
+
+        # 🔔 Emit "councilor_started" event via WebSocket with all IDs
+        try:
+            from src.api.websocket import gamification_manager
+            await gamification_manager.broadcast("councilor_started", {
+                "councilor_id": instance_id,
+                "agent_id": agent_id,
+                "task_name": task_name,
+                "display_name": display_name,
+                "execution_id": execution_id,
+                "task_id": task_id,  # Include task_id for navigation
+                "started_at": start_time.isoformat(),
+                # Include IDs for navigation
+                "screenplay_id": screenplay_id,
+                "conversation_id": conversation_id,
+                "instance_id": instance_id
+            })
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to broadcast councilor_started event: {e}")
+
+        try:
+            # Get prompt from task config
+            prompt_text = task.get("prompt", "Analyze the project and provide insights")
+
+            # Get Conductor API URL
+            conductor_api_url = os.getenv("CONDUCTOR_API_URL", "http://primoia-conductor-api:8000")
+
+            # Build payload (same as gateway user flow)
+            payload = {
+                "task_id": task_id,
+                "user_input": prompt_text,
+                "cwd": cwd,
+                "timeout": 600,
+                "provider": "claude",  # Default provider
+                "instance_id": instance_id,
+                "conversation_id": conversation_id,
+                "screenplay_id": screenplay_id,
+                "context_mode": "stateless",
+                "is_councilor_execution": True,  # Mark as councilor execution
+                "councilor_config": config
+            }
+
+            logger.info(f"🔍 [COUNCILOR INSTANCE] Calling Conductor API (same flow as user)")
+            logger.info(f"   - POST {conductor_api_url}/agents/{agent_id}/execute")
+            logger.info(f"   - task_id: {task_id}")
+            logger.info(f"   - Input text: {prompt_text[:100]}...")
+            logger.info(f"   - Instance ID: {instance_id}")
+            logger.info(f"   - Screenplay ID: {screenplay_id}")
+            logger.info(f"   - Conversation ID: {conversation_id}")
+            logger.info(f"   - CWD: {cwd}")
+
+            # Call Conductor API via HTTP (same as gateway does)
+            async with httpx.AsyncClient(timeout=630) as client:
+                response = await client.post(
+                    f"{conductor_api_url}/agents/{agent_id}/execute",
+                    json=payload
+                )
+                response.raise_for_status()
+                result = response.json()
+
+            end_time = datetime.utcnow()
+            duration_ms = int((end_time - start_time).total_seconds() * 1000)
+
+            # Extract result data
+            output = result.get("result", "") if isinstance(result, dict) else str(result)
+            exit_code = result.get("exit_code", 0)
+            severity = result.get("severity") or self._analyze_severity(output)
+
+            logger.info(f"✅ [COUNCILOR INSTANCE] Execution completed for {instance_id}")
+            logger.info(f"   - Task ID: {task_id}")
+            logger.info(f"   - Severity: {severity}")
+            logger.info(f"   - Duration: {duration_ms}ms")
+            logger.info(f"   - Exit code: {exit_code}")
+
+            # Update instance statistics
+            await self._update_instance_stats(instance_id, exit_code == 0, duration_ms)
+
+            # 🔔 Emit "councilor_completed" event via WebSocket with all IDs
+            try:
+                from src.api.websocket import gamification_manager
+                await gamification_manager.broadcast("councilor_completed", {
+                    "councilor_id": instance_id,
+                    "agent_id": agent_id,
+                    "task_name": task_name,
+                    "display_name": display_name,
+                    "execution_id": execution_id,
+                    "task_id": task_id,  # Include task_id for navigation
+                    "status": "completed",
+                    "severity": severity,
+                    "started_at": start_time.isoformat(),
+                    "completed_at": end_time.isoformat(),
+                    "duration_ms": duration_ms,
+                    # Include IDs for navigation
+                    "screenplay_id": screenplay_id,
+                    "conversation_id": conversation_id,
+                    "instance_id": instance_id
+                })
+            except Exception as e:
+                logger.warning(f"⚠️ Failed to broadcast councilor_completed event: {e}")
+
+        except httpx.HTTPStatusError as e:
+            logger.error(f"❌ Conductor API error for councilor {instance_id}: {e.response.status_code}")
+            logger.error(f"   - Response: {e.response.text[:500] if e.response.text else 'empty'}")
+            await self._handle_councilor_error(instance, instance_id, agent_id, task_name, display_name, execution_id, task_id, start_time, screenplay_id, conversation_id, str(e))
+
+        except httpx.RequestError as e:
+            logger.error(f"❌ Connection error to Conductor API for councilor {instance_id}: {e}")
+            await self._handle_councilor_error(instance, instance_id, agent_id, task_name, display_name, execution_id, task_id, start_time, screenplay_id, conversation_id, str(e))
+
+        except Exception as e:
+            logger.error(f"❌ Error executing councilor instance task {instance_id}: {e}", exc_info=True)
+            await self._handle_councilor_error(instance, instance_id, agent_id, task_name, display_name, execution_id, task_id, start_time, screenplay_id, conversation_id, str(e))
+
+    async def _handle_councilor_error(self, instance: dict, instance_id: str, agent_id: str, task_name: str, display_name: str, execution_id: str, task_id: str, start_time: datetime, screenplay_id: str, conversation_id: str, error_message: str):
+        """Handle councilor execution error - update stats and broadcast event"""
+        end_time = datetime.utcnow()
+        error_duration_ms = int((end_time - start_time).total_seconds() * 1000)
+
+        # Update stats with failure
+        await self._update_instance_stats(instance_id, success=False, duration_ms=error_duration_ms)
+
+        # 🔔 Emit "councilor_error" event via WebSocket with all IDs
+        try:
+            from src.api.websocket import gamification_manager
+            await gamification_manager.broadcast("councilor_error", {
+                "councilor_id": instance_id,
+                "agent_id": agent_id,
+                "task_name": task_name,
+                "display_name": display_name,
+                "execution_id": execution_id,
+                "task_id": task_id,
+                "status": "error",
+                "severity": "error",
+                "error": error_message,
+                "started_at": start_time.isoformat(),
+                "completed_at": end_time.isoformat(),
+                # Include IDs for navigation
+                "screenplay_id": screenplay_id,
+                "conversation_id": conversation_id,
+                "instance_id": instance_id
+            })
+        except Exception as broadcast_err:
+            logger.warning(f"⚠️ Failed to broadcast councilor_error event: {broadcast_err}")
+
+    async def _update_instance_stats(self, instance_id: str, success: bool, duration_ms: int = 0):
+        """
+        Update councilor instance execution statistics (normalized structure).
+
+        Args:
+            instance_id: Instance ID
+            success: Whether execution was successful
+            duration_ms: Execution duration in milliseconds
+        """
+        try:
+            agent_instances = self.db.agent_instances
+            instance = await agent_instances.find_one({"instance_id": instance_id})
+
+            if not instance:
+                logger.warning(f"Instance {instance_id} not found for stats update")
+                return
+
+            # Get current statistics (support both old 'stats' and new 'statistics')
+            statistics = instance.get("statistics", instance.get("stats", {
+                "task_count": 0,
+                "total_execution_time": 0.0,
+                "average_execution_time": 0.0,
+                "success_count": 0,
+                "error_count": 0,
+                "total_executions": 0,
+                "success_rate": 0.0,
+                "last_execution": None
+            }))
+
+            # Calculate new statistics
+            now = datetime.utcnow()
+            task_count = statistics.get("task_count", statistics.get("total_executions", 0)) + 1
+            total_time = statistics.get("total_execution_time", 0.0) + duration_ms
+            avg_time = total_time / task_count if task_count > 0 else 0.0
+            success_count = statistics.get("success_count", 0) + (1 if success else 0)
+            error_count = statistics.get("error_count", 0) + (0 if success else 1)
+            success_rate = (success_count / task_count) * 100.0 if task_count > 0 else 0.0
+
+            # Update in database with normalized structure
+            await agent_instances.update_one(
+                {"instance_id": instance_id},
+                {"$set": {
+                    # Normalized statistics (same as regular agent_instances)
+                    "statistics.task_count": task_count,
+                    "statistics.total_execution_time": total_time,
+                    "statistics.average_execution_time": round(avg_time, 2),
+                    "statistics.last_task_duration": duration_ms,
+                    "statistics.last_task_completed_at": now.isoformat(),
+                    "statistics.success_count": success_count,
+                    "statistics.error_count": error_count,
+                    "statistics.last_exit_code": 0 if success else 1,
+                    # Councilor-specific (for backwards compatibility)
+                    "statistics.total_executions": task_count,
+                    "statistics.success_rate": round(success_rate, 1),
+                    "statistics.last_execution": now.isoformat(),
+                    # Top-level fields
+                    "last_execution": now.isoformat(),
+                    "updated_at": now.isoformat()
+                }}
+            )
+
+            logger.debug(
+                f"📊 Statistics updated for instance {instance_id}: "
+                f"{task_count} executions, {success_rate:.1f}% success, avg {avg_time:.0f}ms"
+            )
+
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to update statistics for instance {instance_id}: {e}")
 
     def _parse_interval_trigger(self, value: str) -> IntervalTrigger:
         """
@@ -493,6 +844,49 @@ class CouncilorBackendScheduler:
                 "trigger": str(job.trigger)
             })
         return jobs
+
+    async def execute_councilor_now(self, agent_id: str) -> dict:
+        """
+        Execute a councilor task immediately (manual trigger)
+
+        Args:
+            agent_id: Agent ID of the councilor to execute
+
+        Returns:
+            Execution result dict with status, severity, output
+        """
+        logger.info(f"🚀 [EXECUTE NOW] Triggering immediate execution for {agent_id}")
+
+        try:
+            # Fetch councilor from database
+            councilor = await self.agents_collection.find_one({"agent_id": agent_id})
+
+            if not councilor:
+                raise ValueError(f"Councilor {agent_id} not found")
+
+            if not councilor.get("is_councilor"):
+                raise ValueError(f"Agent {agent_id} is not a councilor")
+
+            config = councilor.get("councilor_config")
+            if not config:
+                raise ValueError(f"Councilor {agent_id} has no configuration")
+
+            # Execute the task directly (bypassing scheduler)
+            await self._execute_councilor_task(agent_id, config)
+
+            # Get updated stats
+            updated_agent = await self.agents_collection.find_one({"agent_id": agent_id})
+            stats = updated_agent.get("stats", {}) if updated_agent else {}
+
+            return {
+                "status": "completed",
+                "agent_id": agent_id,
+                "stats": stats
+            }
+
+        except Exception as e:
+            logger.error(f"❌ [EXECUTE NOW] Failed for {agent_id}: {e}")
+            raise
 
     async def shutdown(self):
         """Shutdown scheduler gracefully"""

@@ -27,7 +27,11 @@ from ...models.councilor import (
     CouncilorExecutionResponse,
     CouncilorReportResponse,
     SuccessResponse,
-    ScheduleResponse
+    ScheduleResponse,
+    # New instance-based models
+    PromoteToCouncilorInstanceRequest,
+    CouncilorInstanceResponse,
+    CouncilorInstanceListResponse,
 )
 
 logger = logging.getLogger(__name__)
@@ -69,7 +73,415 @@ async def get_scheduled_jobs(
     return {"jobs": jobs, "count": len(jobs)}
 
 
-# ========== List Endpoints ==========
+# ========== Instance-Based Councilor Endpoints (NEW) ==========
+
+@router.post(
+    "/promote",
+    response_model=CouncilorInstanceResponse,
+    status_code=status.HTTP_201_CREATED
+)
+async def promote_to_councilor_instance(
+    request: PromoteToCouncilorInstanceRequest,
+    db: AsyncIOMotorDatabase = Depends(get_database),
+    scheduler: Optional[CouncilorBackendScheduler] = Depends(get_councilor_scheduler)
+):
+    """
+    Promote an agent template to a councilor instance.
+
+    This creates:
+    1. A new screenplay for the councilor
+    2. A new conversation in the screenplay
+    3. A new agent_instance with councilor configuration
+
+    **Request Body:**
+    - `agent_id`: ID of the agent template to promote
+    - `councilor_config`: Complete councilor configuration
+    - `customization` (optional): Visual customization
+
+    **Returns:**
+    - instance_id, screenplay_id, conversation_id
+    """
+    import httpx
+    from datetime import datetime
+    from src.config.settings import CONDUCTOR_CONFIG
+
+    agent_id = request.agent_id
+    councilor_config = request.councilor_config
+    customization = request.customization
+
+    try:
+        logger.info(f"⭐ [PROMOTE] Promoting agent '{agent_id}' to councilor instance")
+
+        # 1. Validate agent template exists
+        agents_collection = db.agents
+        agent = await agents_collection.find_one({"agent_id": agent_id})
+
+        if not agent:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Agent template '{agent_id}' not found"
+            )
+
+        # Get display name from customization or agent
+        display_name = (
+            customization.display_name if customization and customization.display_name
+            else agent.get("definition", {}).get("name", agent_id)
+        )
+
+        # Generate unique IDs
+        timestamp = int(datetime.utcnow().timestamp() * 1000)
+        instance_id = f"councilor_{agent_id}_{timestamp}"
+
+        # 2. Create screenplay for councilor
+        logger.info(f"📜 [PROMOTE] Creating screenplay for councilor '{display_name}'")
+
+        screenplays_collection = db.screenplays
+        screenplay_name = f"Councilor: {display_name}"
+        screenplay_content = f"""# {screenplay_name}
+
+## Configuração
+- **Agente:** {agent.get('definition', {}).get('name', agent_id)}
+- **Tarefa:** {councilor_config.task.name}
+- **Agendamento:** {councilor_config.schedule.type}={councilor_config.schedule.value}
+
+## Descrição
+{councilor_config.task.prompt[:500]}...
+
+---
+*Este screenplay foi criado automaticamente para rastrear execuções do conselheiro.*
+"""
+
+        now = datetime.utcnow()
+        screenplay_doc = {
+            "name": screenplay_name,
+            "description": f"Screenplay para conselheiro: {councilor_config.title}",
+            "tags": ["councilor", "auto-generated"],
+            "content": screenplay_content,
+            "isDeleted": False,
+            "version": 1,
+            "createdAt": now,
+            "updatedAt": now,
+        }
+
+        screenplay_result = await screenplays_collection.insert_one(screenplay_doc)
+        screenplay_id = str(screenplay_result.inserted_id)
+        logger.info(f"✅ [PROMOTE] Created screenplay: {screenplay_id}")
+
+        # 3. Create conversation via Conductor API
+        logger.info(f"💬 [PROMOTE] Creating conversation for councilor")
+
+        conductor_url = CONDUCTOR_CONFIG.get('conductor_api_url', 'http://localhost:8000')
+        conversation_payload = {
+            "title": f"Histórico: {display_name}",
+            "screenplay_id": screenplay_id,
+            "agent_id": agent_id
+        }
+
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.post(
+                    f"{conductor_url}/conversations/",
+                    json=conversation_payload
+                )
+
+                if response.status_code not in (200, 201):
+                    logger.error(f"❌ [PROMOTE] Failed to create conversation: {response.status_code} - {response.text}")
+                    # Rollback: delete screenplay
+                    await screenplays_collection.delete_one({"_id": screenplay_result.inserted_id})
+                    raise HTTPException(
+                        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                        detail=f"Failed to create conversation: {response.text}"
+                    )
+
+                conversation_data = response.json()
+                conversation_id = conversation_data.get("conversation_id") or conversation_data.get("id")
+                logger.info(f"✅ [PROMOTE] Created conversation: {conversation_id}")
+
+        except httpx.RequestError as e:
+            logger.error(f"❌ [PROMOTE] Connection error to Conductor API: {e}")
+            # Rollback: delete screenplay
+            await screenplays_collection.delete_one({"_id": screenplay_result.inserted_id})
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=f"Could not connect to Conductor API: {str(e)}"
+            )
+
+        # 4. Create agent_instance via internal call (same structure as POST /api/agents/instances)
+        # This ensures councilor instances have the SAME structure as chat instances
+        logger.info(f"🏛️ [PROMOTE] Creating councilor instance: {instance_id}")
+
+        agent_instances = db.agent_instances
+
+        # Extract agent definition for normalized fields
+        agent_definition = agent.get("definition", {})
+        agent_emoji = agent_definition.get("emoji", "🏛️")
+
+        # Build instance document with SAME structure as POST /api/agents/instances
+        instance_doc = {
+            # Required fields (same as chat)
+            "instance_id": instance_id,
+            "agent_id": agent_id,
+            "screenplay_id": screenplay_id,
+            "conversation_id": conversation_id,
+            "position": {"x": 100, "y": 100},
+            "status": "idle",
+            "created_at": now.isoformat(),
+            "updated_at": now.isoformat(),
+            "last_execution": None,
+
+            # Optional fields (same as chat)
+            "cwd": request.cwd,
+            "emoji": agent_emoji,
+            "display_order": 0,
+            "definition": {
+                "title": agent_definition.get("name", agent_id),
+                "description": agent_definition.get("description", ""),
+                "unicode": agent_definition.get("unicode", "")
+            },
+
+            # Statistics (same as chat - initialized)
+            "statistics": {
+                "task_count": 0,
+                "total_execution_time": 0.0,
+                "average_execution_time": 0.0,
+                "last_task_duration": 0.0,
+                "last_task_completed_at": None,
+                "success_count": 0,
+                "error_count": 0,
+                "last_exit_code": None,
+                "total_executions": 0,
+                "success_rate": 0.0,
+                "last_execution": None
+            },
+
+            # Councilor-specific fields (extra)
+            "is_councilor_instance": True,
+            "councilor_config": councilor_config.model_dump(),
+            "customization": customization.model_dump() if customization else None,
+        }
+
+        await agent_instances.insert_one(instance_doc)
+        logger.info(f"✅ [PROMOTE] Created councilor instance: {instance_id}")
+
+        # 5. Schedule in backend scheduler if available and enabled
+        if scheduler and councilor_config.schedule.enabled:
+            try:
+                # Build councilor dict similar to legacy format for scheduler
+                councilor_dict = {
+                    "agent_id": agent_id,
+                    "instance_id": instance_id,
+                    "screenplay_id": screenplay_id,
+                    "conversation_id": conversation_id,
+                    "definition": agent.get("definition", {}),
+                    "councilor_config": councilor_config.model_dump(),
+                    "customization": customization.model_dump() if customization else None,
+                    "cwd": request.cwd,  # Pass cwd to scheduler
+                }
+                await scheduler.schedule_councilor_instance(councilor_dict)
+                logger.info(f"✅ [PROMOTE] Scheduled councilor '{instance_id}' in backend scheduler")
+            except Exception as e:
+                logger.warning(f"⚠️ [PROMOTE] Failed to schedule councilor: {e}")
+                # Don't fail - instance was created, scheduler can pick it up on restart
+
+        return CouncilorInstanceResponse(
+            success=True,
+            message=f"Agent '{agent_id}' promoted to councilor successfully",
+            instance_id=instance_id,
+            screenplay_id=screenplay_id,
+            conversation_id=conversation_id
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ [PROMOTE] Error promoting agent: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to promote agent: {str(e)}"
+        )
+
+
+@router.get(
+    "/instances",
+    response_model=CouncilorInstanceListResponse,
+    status_code=status.HTTP_200_OK
+)
+async def list_councilor_instances(
+    db: AsyncIOMotorDatabase = Depends(get_database)
+):
+    """
+    List all councilor instances (from agent_instances collection).
+
+    **Returns:**
+    - List of councilor instances with agent template data
+    """
+    try:
+        logger.info("📋 [INSTANCES] Listing councilor instances")
+
+        agent_instances = db.agent_instances
+        agents_collection = db.agents
+
+        # Find all councilor instances
+        cursor = agent_instances.find({
+            "is_councilor_instance": True,
+            "$or": [
+                {"isDeleted": {"$ne": True}},
+                {"isDeleted": {"$exists": False}}
+            ]
+        })
+
+        instances = await cursor.to_list(length=None)
+
+        # Enrich with agent template data
+        result_instances = []
+        for instance in instances:
+            # Get agent template
+            agent = await agents_collection.find_one({"agent_id": instance.get("agent_id")})
+
+            # Get agent definition for fallback values
+            agent_def = agent.get("definition", {}) if agent else {}
+
+            result_instance = {
+                "instance_id": instance.get("instance_id"),
+                "agent_id": instance.get("agent_id"),
+                "screenplay_id": instance.get("screenplay_id"),
+                "conversation_id": instance.get("conversation_id"),
+                "is_councilor_instance": True,
+                "councilor_config": instance.get("councilor_config"),
+                "customization": instance.get("customization"),
+                "cwd": instance.get("cwd"),
+
+                # Normalized fields (same as regular agent_instances)
+                "emoji": instance.get("emoji") or agent_def.get("emoji", "🏛️"),
+                "display_order": instance.get("display_order", 0),
+                "definition": instance.get("definition") or {
+                    "title": agent_def.get("name", instance.get("agent_id")),
+                    "description": agent_def.get("description", ""),
+                    "unicode": agent_def.get("unicode", "")
+                },
+                "position": instance.get("position", {"x": 100, "y": 100}),
+
+                # Statistics (normalized) - prefer 'statistics', fallback to 'stats'
+                "statistics": instance.get("statistics") or instance.get("stats", {
+                    "task_count": 0,
+                    "total_execution_time": 0.0,
+                    "average_execution_time": 0.0,
+                    "success_count": 0,
+                    "error_count": 0,
+                    "total_executions": 0,
+                    "success_rate": 0.0,
+                    "last_execution": None
+                }),
+
+                "status": instance.get("status", "idle"),
+                "last_execution": instance.get("last_execution"),
+                "created_at": instance.get("created_at"),
+                "updated_at": instance.get("updated_at"),
+
+                # Agent template data (for backwards compatibility)
+                "agent_name": agent_def.get("name"),
+                "agent_emoji": agent_def.get("emoji"),
+                "agent_description": agent_def.get("description"),
+            }
+            result_instances.append(result_instance)
+
+        logger.info(f"📋 [INSTANCES] Found {len(result_instances)} councilor instances")
+
+        return CouncilorInstanceListResponse(
+            instances=result_instances,
+            count=len(result_instances)
+        )
+
+    except Exception as e:
+        logger.error(f"❌ [INSTANCES] Error listing councilor instances: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to list councilor instances: {str(e)}"
+        )
+
+
+@router.delete(
+    "/instances/{instance_id}",
+    response_model=CouncilorInstanceResponse,
+    status_code=status.HTTP_200_OK
+)
+async def demote_councilor_instance(
+    instance_id: str = Path(..., description="Instance ID of the councilor to demote"),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+    scheduler: Optional[CouncilorBackendScheduler] = Depends(get_councilor_scheduler)
+):
+    """
+    Remove a councilor instance (soft delete).
+
+    **Path Parameters:**
+    - `instance_id`: Instance ID of the councilor
+
+    **Returns:**
+    - Success message
+    """
+    try:
+        logger.info(f"🔻 [DEMOTE] Demoting councilor instance: {instance_id}")
+
+        agent_instances = db.agent_instances
+
+        # Find instance
+        instance = await agent_instances.find_one({"instance_id": instance_id})
+
+        if not instance:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Councilor instance '{instance_id}' not found"
+            )
+
+        if not instance.get("is_councilor_instance"):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Instance '{instance_id}' is not a councilor"
+            )
+
+        # Soft delete
+        from datetime import datetime
+        await agent_instances.update_one(
+            {"instance_id": instance_id},
+            {
+                "$set": {
+                    "isDeleted": True,
+                    "updated_at": datetime.utcnow().isoformat()
+                }
+            }
+        )
+
+        # Remove from scheduler if available
+        if scheduler:
+            try:
+                # Use agent_id for scheduler (legacy compatibility)
+                agent_id = instance.get("agent_id")
+                await scheduler.remove_councilor(agent_id)
+                logger.info(f"✅ [DEMOTE] Removed '{agent_id}' from scheduler")
+            except Exception as e:
+                logger.warning(f"⚠️ [DEMOTE] Failed to remove from scheduler: {e}")
+
+        logger.info(f"✅ [DEMOTE] Councilor instance '{instance_id}' demoted")
+
+        return CouncilorInstanceResponse(
+            success=True,
+            message=f"Councilor instance '{instance_id}' demoted successfully",
+            instance_id=instance_id,
+            screenplay_id=instance.get("screenplay_id"),
+            conversation_id=instance.get("conversation_id")
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ [DEMOTE] Error demoting councilor: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to demote councilor: {str(e)}"
+        )
+
+
+# ========== Legacy List Endpoints ==========
 
 @router.get("", response_model=AgentListResponse)
 async def list_agents(
@@ -505,4 +917,89 @@ async def get_latest_execution(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to get latest execution: {str(e)}"
+        )
+
+
+# ========== Execute Now Endpoint ==========
+
+@router.post(
+    "/{agent_id}/execute-now",
+    response_model=SuccessResponse,
+    status_code=status.HTTP_200_OK
+)
+async def execute_councilor_now(
+    agent_id: str = Path(..., description="Agent ID of the councilor to execute"),
+    service: CouncilorService = Depends(get_councilor_service),
+    scheduler: Optional[CouncilorBackendScheduler] = Depends(get_councilor_scheduler)
+):
+    """
+    Execute a councilor's task immediately
+
+    **Path Parameters:**
+    - `agent_id`: Unique identifier of the councilor
+
+    **Returns:**
+    - Execution result with severity and output
+
+    **Errors:**
+    - `404 Not Found`: Councilor not found
+    - `400 Bad Request`: Agent is not a councilor
+    - `503 Service Unavailable`: Scheduler not available
+    """
+    try:
+        logger.info(f"🚀 Executing councilor '{agent_id}' immediately")
+
+        # Validate councilor exists
+        from ...core.database import get_db_instance
+        db = get_db_instance()
+        if not db:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Database not available"
+            )
+
+        # Get agent from database
+        agent = await db.agents.find_one({"agent_id": agent_id})
+        if not agent:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Agent '{agent_id}' not found"
+            )
+
+        if not agent.get("is_councilor"):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Agent '{agent_id}' is not a councilor"
+            )
+
+        # Execute via scheduler if available
+        if scheduler:
+            try:
+                result = await scheduler.execute_councilor_now(agent_id)
+                logger.info(f"✅ Councilor '{agent_id}' executed successfully")
+
+                return SuccessResponse(
+                    success=True,
+                    message=f"Councilor '{agent_id}' executed successfully",
+                    execution=result
+                )
+            except Exception as e:
+                logger.error(f"❌ Failed to execute councilor: {e}")
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"Failed to execute councilor: {str(e)}"
+                )
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Scheduler not available"
+            )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Error executing councilor: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to execute councilor: {str(e)}"
         )

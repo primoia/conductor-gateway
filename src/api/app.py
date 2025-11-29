@@ -1454,6 +1454,37 @@ def create_app() -> FastAPI:
                 insert_doc["definition"] = payload["definition"]
             if "display_order" in payload:
                 insert_doc["display_order"] = payload["display_order"]
+            else:
+                insert_doc["display_order"] = 0  # Default
+
+            # Initialize statistics (normalized structure for all instances)
+            insert_doc["statistics"] = {
+                "task_count": 0,
+                "total_execution_time": 0.0,
+                "average_execution_time": 0.0,
+                "last_task_duration": 0.0,
+                "last_task_completed_at": None,
+                "success_count": 0,
+                "error_count": 0,
+                "last_exit_code": None,
+                # Councilor-specific (for compatibility)
+                "total_executions": 0,
+                "success_rate": 0.0,
+                "last_execution": None
+            }
+
+            # ========== Councilor fields (optional) ==========
+            # If is_councilor_instance is true, add councilor-specific fields
+            if payload.get("is_councilor_instance"):
+                insert_doc["is_councilor_instance"] = True
+                insert_doc["status"] = payload.get("status", "idle")  # Councilors default to "idle"
+
+                if "councilor_config" in payload:
+                    insert_doc["councilor_config"] = payload["councilor_config"]
+                if "customization" in payload:
+                    insert_doc["customization"] = payload["customization"]
+
+                logger.info(f"🏛️ [AGENT INSTANCE] Creating councilor instance: {instance_id}")
 
             # Insert into MongoDB
             logger.info(f"🔍 [DEBUG] Documento final a ser inserido no MongoDB:")

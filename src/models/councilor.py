@@ -283,3 +283,130 @@ class ScheduleResponse(BaseModel):
     success: bool = True
     message: str
     schedule: CouncilorSchedule
+
+
+# ========== Instance-Based Councilor Models (NEW) ==========
+
+class PromoteToCouncilorInstanceRequest(BaseModel):
+    """
+    Request to promote agent to councilor instance.
+    Creates: screenplay + conversation + agent_instance
+    """
+    agent_id: str = Field(..., description="ID of the agent template to promote")
+    councilor_config: CouncilorConfig
+    customization: Optional[AgentCustomization] = None
+    cwd: Optional[str] = Field(
+        default=None,
+        description="Working directory for agent execution (project path)"
+    )
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "agent_id": "quality_agent",
+                "councilor_config": {
+                    "title": "Conselheiro de Qualidade",
+                    "schedule": {
+                        "type": "interval",
+                        "value": "30m",
+                        "enabled": True
+                    },
+                    "task": {
+                        "name": "Verificar Cobertura de Testes",
+                        "prompt": "Analise a cobertura de testes do projeto...",
+                        "output_format": "checklist"
+                    },
+                    "notifications": {
+                        "on_success": False,
+                        "on_warning": True,
+                        "on_error": True,
+                        "channels": ["panel"]
+                    }
+                },
+                "customization": {
+                    "display_name": "Dr. Silva"
+                },
+                "cwd": "/home/user/my-project"
+            }
+        }
+
+
+class CouncilorInstanceResponse(BaseModel):
+    """Response for councilor instance operations"""
+    success: bool = True
+    message: str
+    instance_id: Optional[str] = None
+    screenplay_id: Optional[str] = None
+    conversation_id: Optional[str] = None
+
+
+class InstancePosition(BaseModel):
+    """Position for visual display"""
+    x: float = 100
+    y: float = 100
+
+
+class InstanceDefinition(BaseModel):
+    """Instance definition (normalized from agent)"""
+    title: str = ""
+    description: str = ""
+    unicode: str = ""
+
+
+class InstanceStatistics(BaseModel):
+    """Normalized statistics for agent instances"""
+    # Standard fields (same as regular agent_instances)
+    task_count: int = 0
+    total_execution_time: float = 0.0
+    average_execution_time: float = 0.0
+    last_task_duration: float = 0.0
+    last_task_completed_at: Optional[str] = None
+    success_count: int = 0
+    error_count: int = 0
+    last_exit_code: Optional[int] = None
+    # Councilor-specific (for backwards compatibility)
+    total_executions: int = 0
+    success_rate: float = 0.0
+    last_execution: Optional[str] = None
+
+
+class CouncilorInstance(BaseModel):
+    """
+    Councilor instance stored in agent_instances collection.
+    Normalized structure (same as regular agent_instances with councilor extras).
+    """
+    instance_id: str
+    agent_id: str
+    screenplay_id: str  # REQUIRED
+    conversation_id: str  # REQUIRED
+    is_councilor_instance: bool = True
+    councilor_config: CouncilorConfig
+    customization: Optional[AgentCustomization] = None
+    cwd: Optional[str] = None  # Working directory
+
+    # Normalized fields (same as regular agent_instances)
+    emoji: Optional[str] = "🏛️"
+    display_order: int = 0
+    definition: Optional[InstanceDefinition] = None
+    position: Optional[InstancePosition] = None
+    statistics: Optional[InstanceStatistics] = None
+
+    status: Literal["idle", "running", "paused"] = "idle"
+    last_execution: Optional[str] = None
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+
+    # Agent template data (from join, for backwards compatibility)
+    agent_name: Optional[str] = None
+    agent_emoji: Optional[str] = None
+    agent_description: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+        populate_by_name = True
+
+
+class CouncilorInstanceListResponse(BaseModel):
+    """Response for listing councilor instances"""
+    instances: List[CouncilorInstance]
+    count: int
