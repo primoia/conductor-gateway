@@ -2322,7 +2322,11 @@ def create_app() -> FastAPI:
                         "duration_ms": int(duration * 1000),
                         "completed_at": completed_at.isoformat() if completed_at else None,
                         "is_councilor": is_councilor,
-                        "level": level
+                        "level": level,
+                        # Navigation fields for "open in new tab" feature
+                        "screenplay_id": task_doc.get("screenplay_id"),
+                        "conversation_id": task_doc.get("conversation_id"),
+                        "instance_id": task_doc.get("instance_id")
                     },
                     "timestamp": timestamp_ms
                 }
