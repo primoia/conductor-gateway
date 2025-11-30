@@ -1181,38 +1181,62 @@ def create_app() -> FastAPI:
             final_cwd = cwd or CONDUCTOR_CONFIG.get("project_path")
 
             # ========================================================================
-            # 3. EMIT WEBSOCKET EVENT: agent_execution_started
+            # 3. GENERATE TASK_ID AND GET AGENT METADATA
             # ========================================================================
             start_time = datetime.utcnow()
+
+            # 🔥 Gateway generates task_id upfront
+            from bson import ObjectId
+            task_id = str(ObjectId())
+
             execution_id = f"exec_{actual_agent_id}_{int(start_time.timestamp() * 1000)}"
 
             agent_definition = agent.get("definition", {}) if isinstance(agent.get("definition"), dict) else {}
             agent_name = agent_definition.get("name", agent_id)
             agent_emoji = agent_definition.get("emoji", "🤖")
 
+            # ========================================================================
+            # 4. EMIT WEBSOCKET EVENT + SAVE TO MONGO: task_started
+            # ========================================================================
             try:
-                await gamification_manager.broadcast("agent_execution_started", {
+                # Save task to MongoDB with status=processing
+                if mongo_db is not None:
+                    tasks_collection = mongo_db["tasks"]
+                    tasks_collection.insert_one({
+                        "task_id": task_id,
+                        "agent_id": actual_agent_id,
+                        "agent_name": agent_name,
+                        "agent_emoji": agent_emoji,
+                        "instance_id": instance_id,
+                        "conversation_id": conversation_id,
+                        "screenplay_id": screenplay_id,
+                        "status": "processing",
+                        "created_at": start_time,
+                        "updated_at": start_time
+                    })
+                    logger.info(f"💾 [GATEWAY] Saved task_started to MongoDB: {task_id}")
+
+                # Broadcast to WebSocket
+                await gamification_manager.broadcast("task_started", {
+                    "task_id": task_id,
                     "agent_id": actual_agent_id,
                     "agent_name": agent_name,
                     "agent_emoji": agent_emoji,
                     "instance_id": instance_id,
-                    "execution_id": execution_id,
+                    "status": "processing",
                     "started_at": start_time.isoformat(),
-                    "level": "debug"  # Debug level - execution log
+                    "level": "debug"
                 })
+                logger.info(f"📡 [GATEWAY] Broadcasted task_started for {agent_name}")
             except Exception as e:
-                logger.warning(f"⚠️ Failed to broadcast agent_execution_started event: {e}")
+                logger.warning(f"⚠️ Failed to save/broadcast task_started event: {e}")
 
             # ========================================================================
-            # 4. CALL CONDUCTOR API (which will build prompt and insert to MongoDB)
+            # 5. CALL CONDUCTOR API (which will build prompt and execute)
             # ========================================================================
             logger.info("🔄 [GATEWAY] Calling Conductor API to execute agent...")
             logger.info(f"   - Conductor API will build the complete prompt using PromptEngine")
-            logger.info(f"   - Then submit to MongoDB tasks collection")
-
-            # 🔥 Gateway generates task_id
-            from bson import ObjectId
-            task_id = str(ObjectId())
+            logger.info(f"   - Then execute via LLM")
 
             # Make HTTP request to Conductor API
             import httpx
@@ -1265,7 +1289,7 @@ def create_app() -> FastAPI:
                     )
 
             # ========================================================================
-            # 5. EXTRACT RESULT FROM CONDUCTOR API RESPONSE
+            # 6. EXTRACT RESULT FROM CONDUCTOR API RESPONSE
             # ========================================================================
             result_text = conductor_result.get("result", "")
             exit_code = conductor_result.get("exit_code", 0)
