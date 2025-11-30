@@ -9,6 +9,7 @@ Provides endpoints for:
 """
 
 import logging
+from datetime import datetime
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
 from motor.motor_asyncio import AsyncIOMotorDatabase
@@ -573,6 +574,115 @@ async def update_instance_schedule(
         )
 
 
+@router.patch(
+    "/instances/{instance_id}/config",
+    response_model=CouncilorInstanceResponse,
+    status_code=status.HTTP_200_OK
+)
+async def update_instance_config(
+    instance_id: str = Path(..., description="Instance ID of the councilor"),
+    request: dict = ...,
+    db: AsyncIOMotorDatabase = Depends(get_database),
+    scheduler: Optional[CouncilorBackendScheduler] = Depends(get_councilor_scheduler)
+):
+    """
+    Update councilor instance configuration.
+
+    **Path Parameters:**
+    - `instance_id`: Instance ID of the councilor
+
+    **Request Body:**
+    - `title`: Councilor title/role
+    - `task`: Task configuration (name, prompt, context_files)
+    - `schedule`: Schedule configuration (type, value, enabled)
+    - `notifications`: Notification preferences
+
+    **Returns:**
+    - Updated instance
+    """
+    try:
+        logger.info(f"⚙️ [CONFIG] Updating config for instance: {instance_id}")
+
+        agent_instances = db.agent_instances
+
+        # Find instance
+        instance = await agent_instances.find_one({"instance_id": instance_id})
+
+        if not instance:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Councilor instance '{instance_id}' not found"
+            )
+
+        # Build update document
+        update_doc = {}
+        councilor_config = instance.get("councilor_config", {})
+
+        if "title" in request:
+            councilor_config["title"] = request["title"]
+
+        if "task" in request:
+            councilor_config["task"] = {
+                **councilor_config.get("task", {}),
+                **request["task"]
+            }
+
+        if "schedule" in request:
+            councilor_config["schedule"] = {
+                **councilor_config.get("schedule", {}),
+                **request["schedule"]
+            }
+
+        if "notifications" in request:
+            councilor_config["notifications"] = {
+                **councilor_config.get("notifications", {}),
+                **request["notifications"]
+            }
+
+        update_doc["councilor_config"] = councilor_config
+        update_doc["updated_at"] = datetime.utcnow()
+
+        # Update in database
+        result = await agent_instances.update_one(
+            {"instance_id": instance_id},
+            {"$set": update_doc}
+        )
+
+        if result.modified_count == 0:
+            logger.warning(f"⚠️ [CONFIG] No changes made to instance '{instance_id}'")
+
+        # Reload scheduler if schedule changed
+        if scheduler and "schedule" in request:
+            try:
+                await scheduler.reload_councilors()
+                logger.info(f"🔄 [CONFIG] Reloaded scheduler after config update")
+            except Exception as e:
+                logger.warning(f"⚠️ [CONFIG] Scheduler reload failed: {e}")
+
+        # Get updated instance
+        updated_instance = await agent_instances.find_one({"instance_id": instance_id})
+
+        logger.info(f"✅ [CONFIG] Instance '{instance_id}' config updated")
+
+        return CouncilorInstanceResponse(
+            success=True,
+            message="Configuration updated successfully",
+            instance_id=instance_id,
+            screenplay_id=updated_instance.get("screenplay_id", ""),
+            conversation_id=updated_instance.get("conversation_id", ""),
+            instance=updated_instance
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ [CONFIG] Error updating config: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to update config: {str(e)}"
+        )
+
+
 # ========== Legacy List Endpoints ==========
 
 @router.get("", response_model=AgentListResponse)
@@ -1050,19 +1160,33 @@ async def execute_councilor_now(
                 detail="Database not available"
             )
 
-        # Get agent from database
-        agent = await db.agents.find_one({"agent_id": agent_id})
-        if not agent:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Agent '{agent_id}' not found"
-            )
+        # First check agent_instances (NEW instance-based councilors)
+        instance = await db.agent_instances.find_one({
+            "agent_id": agent_id,
+            "is_councilor_instance": True,
+            "$or": [
+                {"isDeleted": {"$ne": True}},
+                {"isDeleted": {"$exists": False}}
+            ]
+        })
 
-        if not agent.get("is_councilor"):
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Agent '{agent_id}' is not a councilor"
-            )
+        if instance:
+            logger.info(f"🏛️ Found councilor instance for agent '{agent_id}'")
+        else:
+            # Fallback to legacy agents collection
+            agent = await db.agents.find_one({"agent_id": agent_id})
+            if not agent:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"Agent '{agent_id}' not found"
+                )
+
+            if not agent.get("is_councilor"):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Agent '{agent_id}' is not a councilor"
+                )
+            logger.info(f"🏛️ Found legacy councilor for agent '{agent_id}'")
 
         # Execute via scheduler if available
         if scheduler:
