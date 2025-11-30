@@ -2288,9 +2288,10 @@ def create_app() -> FastAPI:
 
             logger.info(f"Listing tasks as events with filter: {query_filter}, limit={limit}")
 
-            # Query MongoDB sorted by completed_at descending (most recent first)
+            # Query MongoDB sorted by created_at descending (most recent first)
+            # Use created_at instead of completed_at because completed_at may be null for pending tasks
             cursor = tasks_collection.find(query_filter)
-            cursor = cursor.sort("completed_at", -1).limit(limit)
+            cursor = cursor.sort("created_at", -1).limit(limit)
 
             # Build agent cache to avoid repeated lookups
             agent_cache = {}
@@ -2339,8 +2340,9 @@ def create_app() -> FastAPI:
                 # Determine level (result for councilors/errors, debug for regular executions)
                 level = "result" if is_councilor or status == "error" else "debug"
 
-                # Convert timestamp to milliseconds
-                timestamp_ms = int(completed_at.timestamp() * 1000) if completed_at else 0
+                # Convert timestamp to milliseconds - prefer created_at for ordering consistency
+                created_at = task_doc.get("created_at")
+                timestamp_ms = int(created_at.timestamp() * 1000) if created_at else (int(completed_at.timestamp() * 1000) if completed_at else 0)
 
                 # Build event in same format as WebSocket
                 event = {
