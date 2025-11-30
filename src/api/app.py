@@ -29,7 +29,7 @@ from src.api.routers.councilor import router as councilor_router
 from src.api.routers.agents import router as agents_router
 from src.api.routers.portfolio import router as portfolio_router, limiter
 from src.api.routers.conversations import router as conversations_router  # 🔥 NOVO: Rotas de conversas
-from src.api.models import AgentExecuteRequest
+from src.api.models import AgentExecuteRequest, TaskSubmitRequest
 from src.api.websocket import gamification_manager
 from src.core.database import init_database, close_database
 from src.clients.conductor_client import ConductorClient
@@ -988,7 +988,14 @@ def create_app() -> FastAPI:
                 raise HTTPException(status_code=400, detail="Missing 'type' field")
 
             # Validate event type
-            valid_types = ["task_started", "task_completed", "task_error"]
+            valid_types = [
+                "task_inputted",   # Frontend: user typed message
+                "task_submitted",  # Gateway: saved to MongoDB
+                "task_picked",     # Watcher: picked job from queue
+                "task_started",    # Watcher: started execution (legacy)
+                "task_completed",  # Watcher: execution completed
+                "task_error"       # Watcher: execution failed
+            ]
             if event_type not in valid_types:
                 raise HTTPException(
                     status_code=400,
@@ -1013,6 +1020,131 @@ def create_app() -> FastAPI:
             raise
         except Exception as e:
             logger.error(f"Error processing task event: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail=str(e))
+
+    # ========================================================================
+    # 🔥 Task Observability Endpoints - Fluxo com task_id gerado pelo frontend
+    # ========================================================================
+
+    @app.post("/api/tasks/submit")
+    async def submit_task(request: TaskSubmitRequest):
+        """
+        Submit a task with frontend-generated task_id for immediate observability.
+
+        This endpoint:
+        1. Receives task with pre-generated task_id from frontend
+        2. Saves to MongoDB with status="pending" (for watcher to pick up)
+        3. Emits WebSocket event "task_submitted" for immediate UI feedback
+        4. Returns success, allowing frontend to track task from the moment of input
+
+        Flow:
+        - Frontend generates task_id (UUID) and emits local "task_inputted" event
+        - Frontend calls this endpoint
+        - Gateway saves task to MongoDB and emits "task_submitted" via WebSocket
+        - Watcher picks up task, emits "task_picked", then executes
+        - Watcher emits "task_completed" or "task_error" when done
+        """
+        if mongo_db is None:
+            raise HTTPException(status_code=503, detail="MongoDB connection not available")
+
+        try:
+            now = datetime.utcnow()
+
+            # Prepare task document for MongoDB
+            task_doc = {
+                "task_id": request.task_id,
+                "agent_id": request.agent_id,
+                "agent_name": request.agent_name,
+                "agent_emoji": request.agent_emoji,
+                "instance_id": request.instance_id,
+                "conversation_id": request.conversation_id,
+                "screenplay_id": request.screenplay_id,
+                "status": "pending",  # Watcher will pick this up
+                "prompt": request.input_text,  # Watcher expects 'prompt' field
+                "input_text": request.input_text,  # Keep original field too
+                "cwd": request.cwd or CONDUCTOR_CONFIG.get("project_path"),
+                "provider": request.ai_provider or "claude",
+                "created_at": now,
+                "updated_at": now
+            }
+
+            # Save to MongoDB
+            tasks_collection = mongo_db["tasks"]
+            result = tasks_collection.insert_one(task_doc)
+
+            logger.info(f"💾 [TASK-SUBMIT] Task {request.task_id} saved to MongoDB with status 'pending'")
+            logger.info(f"   - agent: {request.agent_name} ({request.agent_id})")
+            logger.info(f"   - instance_id: {request.instance_id}")
+            logger.info(f"   - conversation_id: {request.conversation_id}")
+
+            # Broadcast WebSocket event
+            await gamification_manager.broadcast("task_submitted", {
+                "task_id": request.task_id,
+                "agent_id": request.agent_id,
+                "agent_name": request.agent_name,
+                "agent_emoji": request.agent_emoji,
+                "instance_id": request.instance_id,
+                "conversation_id": request.conversation_id,
+                "screenplay_id": request.screenplay_id,
+                "status": "pending",
+                "submitted_at": now.isoformat(),
+                "level": "debug"
+            })
+
+            logger.info(f"📡 [TASK-SUBMIT] Broadcasted 'task_submitted' for {request.agent_name}")
+
+            return {
+                "success": True,
+                "task_id": request.task_id,
+                "mongodb_id": str(result.inserted_id),
+                "status": "pending",
+                "message": "Task submitted successfully"
+            }
+
+        except Exception as e:
+            logger.error(f"❌ [TASK-SUBMIT] Error submitting task: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.get("/api/tasks/{task_id}")
+    async def get_task_status(task_id: str):
+        """
+        Get the current status of a task by task_id.
+        Useful for polling fallback when WebSocket is unavailable.
+        """
+        if mongo_db is None:
+            raise HTTPException(status_code=503, detail="MongoDB connection not available")
+
+        try:
+            tasks_collection = mongo_db["tasks"]
+            task = tasks_collection.find_one({"task_id": task_id})
+
+            if not task:
+                raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+
+            return {
+                "success": True,
+                "task": {
+                    "task_id": task.get("task_id"),
+                    "agent_id": task.get("agent_id"),
+                    "agent_name": task.get("agent_name"),
+                    "agent_emoji": task.get("agent_emoji"),
+                    "instance_id": task.get("instance_id"),
+                    "conversation_id": task.get("conversation_id"),
+                    "screenplay_id": task.get("screenplay_id"),
+                    "status": task.get("status"),
+                    "result": task.get("result"),
+                    "exit_code": task.get("exit_code"),
+                    "duration": task.get("duration"),
+                    "created_at": task.get("created_at").isoformat() if task.get("created_at") else None,
+                    "started_at": task.get("started_at").isoformat() if task.get("started_at") else None,
+                    "completed_at": task.get("completed_at").isoformat() if task.get("completed_at") else None
+                }
+            }
+
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"❌ [TASK-STATUS] Error getting task status: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail=str(e))
 
     # Agent Management Endpoints
