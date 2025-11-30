@@ -79,3 +79,20 @@ logger.info(f"Server will run on {SERVER_CONFIG['host']}:{SERVER_CONFIG['port']}
 logger.info(f"MCP server will run on port {SERVER_CONFIG['mcp_port']}")
 logger.info(f"Conductor project path: {CONDUCTOR_CONFIG['project_path']}")
 logger.info(f"MongoDB: {MONGODB_CONFIG['url']}/{MONGODB_CONFIG['database']}")
+
+
+# MongoDB client singleton
+_mongo_client = None
+
+
+def get_mongodb_client():
+    """
+    Get MongoDB client singleton.
+    Creates client on first call, reuses on subsequent calls.
+    """
+    global _mongo_client
+    if _mongo_client is None:
+        from pymongo import MongoClient
+        _mongo_client = MongoClient(MONGODB_CONFIG["url"])
+        logger.info(f"MongoDB client created for {MONGODB_CONFIG['url']}")
+    return _mongo_client

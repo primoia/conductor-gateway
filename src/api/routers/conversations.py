@@ -115,9 +115,51 @@ async def set_active_agent(
 
 
 @router.get("/")
-async def list_conversations(request: Request):
-    """Proxy: Listar conversas."""
-    return await proxy_request("GET", "/conversations/", request)
+async def list_conversations(
+    request: Request,
+    screenplay_id: str = Query(None, description="Filter by screenplay_id"),
+    include_deleted: bool = Query(False, description="Include deleted conversations")
+):
+    """
+    Lista conversas do MongoDB local, filtrando deletadas por padrão.
+    """
+    from src.config.settings import get_mongodb_client
+
+    try:
+        client = get_mongodb_client()
+        db = client['conductor_state']
+        conversations = db['conversations']
+
+        # Build query filter
+        query_filter = {}
+        if screenplay_id:
+            query_filter["screenplay_id"] = screenplay_id
+
+        # Filter out deleted conversations by default
+        if not include_deleted:
+            query_filter["isDeleted"] = {"$ne": True}
+
+        # Query MongoDB sorted by updated_at descending
+        cursor = conversations.find(query_filter)
+        cursor = cursor.sort("updated_at", -1)
+
+        result = []
+        for doc in cursor:
+            # Convert ObjectId to string
+            doc["_id"] = str(doc["_id"])
+            result.append(doc)
+
+        logger.info(f"Listed {len(result)} conversations (include_deleted={include_deleted})")
+
+        return {
+            "success": True,
+            "count": len(result),
+            "conversations": result
+        }
+
+    except Exception as e:
+        logger.error(f"❌ Erro ao listar conversas: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Erro ao listar conversas: {str(e)}")
 
 
 @router.delete("/{conversation_id}")
@@ -125,8 +167,64 @@ async def delete_conversation(
     conversation_id: str = Path(...),
     request: Request = None
 ):
-    """Proxy: Deletar conversa."""
-    return await proxy_request("DELETE", f"/conversations/{conversation_id}", request)
+    """
+    Soft delete conversa e cascade para agent_instances.
+
+    Marca a conversa como isDeleted=true e também marca todos os
+    agent_instances dessa conversa como isDeleted=true.
+    """
+    from datetime import datetime
+    from src.config.settings import get_mongodb_client
+
+    try:
+        # Conectar ao MongoDB
+        client = get_mongodb_client()
+        db = client['conductor_state']
+        conversations = db['conversations']
+        agent_instances = db['agent_instances']
+
+        # Soft delete da conversa
+        conv_result = conversations.update_one(
+            {"conversation_id": conversation_id, "isDeleted": {"$ne": True}},
+            {
+                "$set": {
+                    "isDeleted": True,
+                    "deletedAt": datetime.utcnow(),
+                    "updated_at": datetime.utcnow().isoformat()
+                }
+            }
+        )
+
+        if conv_result.matched_count == 0:
+            raise HTTPException(status_code=404, detail="Conversa não encontrada ou já deletada")
+
+        # Cascade: marcar agent_instances dessa conversa como deletados
+        instances_result = agent_instances.update_many(
+            {"conversation_id": conversation_id, "isDeleted": {"$ne": True}},
+            {
+                "$set": {
+                    "isDeleted": True,
+                    "deletedAt": datetime.utcnow(),
+                    "deletedReason": "conversation_deleted"
+                }
+            }
+        )
+
+        logger.info(f"✅ Conversa {conversation_id} deletada (soft delete)")
+        logger.info(f"   → {instances_result.modified_count} agent_instances marcados como deletados")
+
+        return {
+            "success": True,
+            "message": "Conversa deletada com sucesso",
+            "conversation_id": conversation_id,
+            "instances_deleted": instances_result.modified_count
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Erro ao deletar conversa: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Erro ao deletar conversa: {str(e)}")
 
 
 @router.get("/{conversation_id}/messages")
@@ -177,7 +275,7 @@ async def delete_message(
     try:
         # Conectar ao MongoDB
         client = get_mongodb_client()
-        db = client['conductor']
+        db = client['conductor_state']
         conversations = db['conversations']
 
         # Atualizar a mensagem para marcar como deletada
