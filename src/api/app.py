@@ -549,7 +549,7 @@ def create_app() -> FastAPI:
             logger.info(f"   - input: {input_text[:50]}...")
 
             # ========================================================================
-            # EMIT WEBSOCKET EVENT: task_started
+            # EMIT WEBSOCKET EVENT + SAVE TO MONGO: task_started
             # ========================================================================
             try:
                 # Get agent metadata for display
@@ -563,6 +563,21 @@ def create_app() -> FastAPI:
                         agent_name = definition.get("name", agent_id)
                         agent_emoji = definition.get("emoji", "🤖")
 
+                    # Save task to MongoDB with status=processing
+                    tasks_collection = mongo_db["tasks"]
+                    tasks_collection.insert_one({
+                        "task_id": task_id,
+                        "agent_id": agent_id,
+                        "instance_id": instance_id,
+                        "conversation_id": conversation_id,
+                        "screenplay_id": screenplay_id,
+                        "status": "processing",
+                        "created_at": datetime.utcnow(),
+                        "updated_at": datetime.utcnow()
+                    })
+                    logger.info(f"💾 [GATEWAY] Saved task_started to MongoDB: {task_id}")
+
+                # Broadcast to WebSocket
                 await gamification_manager.broadcast("task_started", {
                     "task_id": task_id,
                     "agent_id": agent_id,
@@ -574,7 +589,7 @@ def create_app() -> FastAPI:
                 })
                 logger.info(f"📡 [GATEWAY] Broadcasted task_started for {agent_name}")
             except Exception as e:
-                logger.warning(f"⚠️ Failed to broadcast task_started event: {e}")
+                logger.warning(f"⚠️ Failed to save/broadcast task_started event: {e}")
 
             # Create event queue for this job
             event_queue: asyncio.Queue = asyncio.Queue(maxsize=1000)
@@ -1279,12 +1294,29 @@ def create_app() -> FastAPI:
             logger.info(f"   - Result length: {len(result_text)} chars")
 
             # ========================================================================
-            # 7. EMIT WEBSOCKET EVENT: task_completed (unified event type)
+            # 7. EMIT WEBSOCKET EVENT + UPDATE MONGO: task_completed
             # ========================================================================
             try:
                 summary = result_text[:200] if result_text else "Sem resultado"
 
-                # Use task_completed event type for consistency
+                # Update task in MongoDB with completed status
+                if mongo_db is not None:
+                    tasks_collection = mongo_db["tasks"]
+                    tasks_collection.update_one(
+                        {"task_id": task_id},
+                        {"$set": {
+                            "status": task_status,
+                            "result": result_text,
+                            "severity": severity,
+                            "duration": duration,
+                            "exit_code": exit_code,
+                            "completed_at": end_time,
+                            "updated_at": end_time
+                        }}
+                    )
+                    logger.info(f"💾 [GATEWAY] Updated task in MongoDB: {task_id} -> {task_status}")
+
+                # Broadcast to WebSocket
                 await gamification_manager.broadcast("task_completed", {
                     "task_id": task_id,
                     "agent_id": actual_agent_id,
@@ -1299,7 +1331,7 @@ def create_app() -> FastAPI:
                 })
                 logger.info(f"📡 [GATEWAY] Broadcasted task_completed for {agent_name}")
             except Exception as e:
-                logger.warning(f"⚠️ Failed to broadcast task_completed event: {e}")
+                logger.warning(f"⚠️ Failed to update/broadcast task_completed event: {e}")
 
             # ========================================================================
             # 8. UPDATE INSTANCE METADATA (if instance_id provided)
