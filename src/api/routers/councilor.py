@@ -454,10 +454,10 @@ async def demote_councilor_instance(
         # Remove from scheduler if available
         if scheduler:
             try:
-                # Use agent_id for scheduler (legacy compatibility)
-                agent_id = instance.get("agent_id")
-                await scheduler.remove_councilor(agent_id)
-                logger.info(f"✅ [DEMOTE] Removed '{agent_id}' from scheduler")
+                # 🔥 Use instance_id como job_id (é assim que o job foi criado)
+                # O scheduler usa instance_id como job_id: job_id = instance_id or agent_id
+                await scheduler.remove_councilor(instance_id)
+                logger.info(f"✅ [DEMOTE] Removed job '{instance_id}' from scheduler")
             except Exception as e:
                 logger.warning(f"⚠️ [DEMOTE] Failed to remove from scheduler: {e}")
 
