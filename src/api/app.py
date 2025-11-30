@@ -548,6 +548,34 @@ def create_app() -> FastAPI:
             logger.info(f"   - conversation_id: {conversation_id}")
             logger.info(f"   - input: {input_text[:50]}...")
 
+            # ========================================================================
+            # EMIT WEBSOCKET EVENT: task_started
+            # ========================================================================
+            try:
+                # Get agent metadata for display
+                agent_name = agent_id
+                agent_emoji = "🤖"
+                if mongo_db:
+                    agents_collection = mongo_db["agents"]
+                    agent_doc = agents_collection.find_one({"agent_id": agent_id})
+                    if agent_doc:
+                        definition = agent_doc.get("definition", {})
+                        agent_name = definition.get("name", agent_id)
+                        agent_emoji = definition.get("emoji", "🤖")
+
+                await gamification_manager.broadcast("task_started", {
+                    "task_id": task_id,
+                    "agent_id": agent_id,
+                    "agent_name": agent_name,
+                    "agent_emoji": agent_emoji,
+                    "instance_id": instance_id,
+                    "status": "processing",
+                    "level": "debug"
+                })
+                logger.info(f"📡 [GATEWAY] Broadcasted task_started for {agent_name}")
+            except Exception as e:
+                logger.warning(f"⚠️ Failed to broadcast task_started event: {e}")
+
             # Create event queue for this job
             event_queue: asyncio.Queue = asyncio.Queue(maxsize=1000)
             ACTIVE_STREAMS[job_id] = event_queue
@@ -1251,18 +1279,27 @@ def create_app() -> FastAPI:
             logger.info(f"   - Result length: {len(result_text)} chars")
 
             # ========================================================================
-            # 7. EMIT WEBSOCKET EVENT: agent_execution_completed
+            # 7. EMIT WEBSOCKET EVENT: task_completed (unified event type)
             # ========================================================================
-            # NOTE: DISABLED - The Watcher now emits task_completed events via /api/internal/task-event
-            # Having both SSE and Watcher emit events was causing duplicate notifications
-            # The Watcher is more reliable as it monitors MongoDB task status changes
-            #
-            # try:
-            #     summary = result_text[:200] if result_text else "Sem resultado"
-            #     await gamification_manager.broadcast("agent_execution_completed", {...})
-            # except Exception as e:
-            #     logger.warning(f"⚠️ Failed to broadcast agent_execution_completed event: {e}")
-            logger.info("📡 [GATEWAY] Skipping agent_execution_completed broadcast (Watcher handles task_completed)")
+            try:
+                summary = result_text[:200] if result_text else "Sem resultado"
+
+                # Use task_completed event type for consistency
+                await gamification_manager.broadcast("task_completed", {
+                    "task_id": task_id,
+                    "agent_id": actual_agent_id,
+                    "agent_name": agent_name,
+                    "agent_emoji": agent_emoji,
+                    "instance_id": instance_id,
+                    "status": task_status,
+                    "severity": severity,
+                    "duration_ms": duration_ms,
+                    "result_summary": summary,
+                    "level": "result"
+                })
+                logger.info(f"📡 [GATEWAY] Broadcasted task_completed for {agent_name}")
+            except Exception as e:
+                logger.warning(f"⚠️ Failed to broadcast task_completed event: {e}")
 
             # ========================================================================
             # 8. UPDATE INSTANCE METADATA (if instance_id provided)
