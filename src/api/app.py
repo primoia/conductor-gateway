@@ -29,7 +29,7 @@ from src.api.routers.councilor import router as councilor_router
 from src.api.routers.agents import router as agents_router
 from src.api.routers.portfolio import router as portfolio_router, limiter
 from src.api.routers.conversations import router as conversations_router  # 🔥 NOVO: Rotas de conversas
-from src.api.models import AgentExecuteRequest, TaskSubmitRequest
+from src.api.models import AgentExecuteRequest
 from src.api.websocket import gamification_manager
 from src.core.database import init_database, close_database
 from src.clients.conductor_client import ConductorClient
@@ -1023,86 +1023,132 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=500, detail=str(e))
 
     # ========================================================================
-    # 🔥 Task Observability Endpoints - Fluxo com task_id gerado pelo frontend
+    # 🔥 Task Events Endpoint - Lista eventos para o event-ticker
     # ========================================================================
 
-    @app.post("/api/tasks/submit")
-    async def submit_task(request: TaskSubmitRequest):
+    @app.get("/api/tasks/events")
+    async def list_tasks_as_events(
+        limit: int = Query(50, ge=1, le=200, description="Maximum number of events to return (default: 50, max: 200)"),
+        include_councilors: bool = Query(True, description="Include councilor executions (default: true)"),
+        include_regular: bool = Query(True, description="Include regular agent executions (default: true)")
+    ):
         """
-        Submit a task with frontend-generated task_id for immediate observability.
+        List recent tasks formatted as gamification events for the frontend.
 
-        This endpoint:
-        1. Receives task with pre-generated task_id from frontend
-        2. Saves to MongoDB with status="pending" (for watcher to pick up)
-        3. Emits WebSocket event "task_submitted" for immediate UI feedback
-        4. Returns success, allowing frontend to track task from the moment of input
+        This endpoint transforms MongoDB task documents into the same event format
+        used by WebSocket real-time events, enabling historical event loading after page reloads.
 
-        Flow:
-        - Frontend generates task_id (UUID) and emits local "task_inputted" event
-        - Frontend calls this endpoint
-        - Gateway saves task to MongoDB and emits "task_submitted" via WebSocket
-        - Watcher picks up task, emits "task_picked", then executes
-        - Watcher emits "task_completed" or "task_error" when done
+        Query parameters:
+        - limit: Maximum number of events (default: 50, max: 200)
+        - include_councilors: Include councilor executions (default: true)
+        - include_regular: Include regular agent executions (default: true)
         """
         if mongo_db is None:
             raise HTTPException(status_code=503, detail="MongoDB connection not available")
 
         try:
-            now = datetime.utcnow()
-
-            # Prepare task document for MongoDB
-            task_doc = {
-                "task_id": request.task_id,
-                "agent_id": request.agent_id,
-                "agent_name": request.agent_name,
-                "agent_emoji": request.agent_emoji,
-                "instance_id": request.instance_id,
-                "conversation_id": request.conversation_id,
-                "screenplay_id": request.screenplay_id,
-                "status": "pending",  # Watcher will pick this up
-                "prompt": request.input_text,  # Watcher expects 'prompt' field
-                "input_text": request.input_text,  # Keep original field too
-                "cwd": request.cwd or CONDUCTOR_CONFIG.get("project_path"),
-                "provider": request.ai_provider or "claude",
-                "created_at": now,
-                "updated_at": now
-            }
-
-            # Save to MongoDB
             tasks_collection = mongo_db["tasks"]
-            result = tasks_collection.insert_one(task_doc)
+            agents_collection = mongo_db["agents"]
 
-            logger.info(f"💾 [TASK-SUBMIT] Task {request.task_id} saved to MongoDB with status 'pending'")
-            logger.info(f"   - agent: {request.agent_name} ({request.agent_id})")
-            logger.info(f"   - instance_id: {request.instance_id}")
-            logger.info(f"   - conversation_id: {request.conversation_id}")
+            # Build query filter - include all completed/error tasks
+            query_filter = {"status": {"$in": ["completed", "error"]}}
 
-            # Broadcast WebSocket event
-            await gamification_manager.broadcast("task_submitted", {
-                "task_id": request.task_id,
-                "agent_id": request.agent_id,
-                "agent_name": request.agent_name,
-                "agent_emoji": request.agent_emoji,
-                "instance_id": request.instance_id,
-                "conversation_id": request.conversation_id,
-                "screenplay_id": request.screenplay_id,
-                "status": "pending",
-                "submitted_at": now.isoformat(),
-                "level": "debug"
-            })
+            # Filter by execution type
+            councilor_filters = []
+            if include_councilors:
+                councilor_filters.append({"is_councilor_execution": True})
+            if include_regular:
+                councilor_filters.append({"is_councilor_execution": {"$ne": True}})
 
-            logger.info(f"📡 [TASK-SUBMIT] Broadcasted 'task_submitted' for {request.agent_name}")
+            if councilor_filters:
+                if len(councilor_filters) == 1:
+                    query_filter.update(councilor_filters[0])
+                else:
+                    query_filter["$or"] = councilor_filters
+
+            logger.info(f"Listing tasks as events with filter: {query_filter}, limit={limit}")
+
+            # Query MongoDB sorted by created_at descending (most recent first)
+            cursor = tasks_collection.find(query_filter)
+            cursor = cursor.sort("created_at", -1).limit(limit)
+
+            # Build agent cache to avoid repeated lookups
+            agent_cache = {}
+
+            events = []
+            for task_doc in cursor:
+                agent_id = task_doc.get("agent_id", "unknown")
+
+                # Get agent metadata (cached)
+                if agent_id not in agent_cache:
+                    agent = agents_collection.find_one({"agent_id": agent_id})
+                    if agent:
+                        definition = agent.get("definition", {})
+                        agent_cache[agent_id] = {
+                            "name": definition.get("name", agent_id),
+                            "emoji": definition.get("emoji", "🤖")
+                        }
+                    else:
+                        # Use agent_name from task if available
+                        agent_cache[agent_id] = {
+                            "name": task_doc.get("agent_name", agent_id),
+                            "emoji": task_doc.get("agent_emoji", "🤖")
+                        }
+
+                agent_meta = agent_cache[agent_id]
+
+                # Determine event type
+                status = task_doc.get("status", "completed")
+                event_type = "task_error" if status == "error" else "task_completed"
+
+                # Extract task data
+                task_id_val = task_doc.get("task_id") or str(task_doc.get("_id", ""))
+                result = task_doc.get("result", "")
+                duration = task_doc.get("duration", 0)
+                completed_at = task_doc.get("completed_at")
+                created_at = task_doc.get("created_at")
+
+                # Generate summary
+                if result:
+                    summary = result[:200] + "..." if len(result) > 200 else result
+                else:
+                    summary = "Execução concluída" if status == "completed" else "Erro na execução"
+
+                # Convert timestamp to milliseconds
+                timestamp_ms = int(created_at.timestamp() * 1000) if created_at else (int(completed_at.timestamp() * 1000) if completed_at else 0)
+
+                event = {
+                    "type": event_type,
+                    "data": {
+                        "task_id": task_id_val,
+                        "agent_id": agent_id,
+                        "agent_name": agent_meta["name"],
+                        "agent_emoji": agent_meta["emoji"],
+                        "status": status,
+                        "severity": "error" if status == "error" else "success",
+                        "summary": summary,
+                        "result_summary": summary,
+                        "duration_ms": int(duration * 1000),
+                        "level": "result",
+                        "screenplay_id": task_doc.get("screenplay_id"),
+                        "conversation_id": task_doc.get("conversation_id"),
+                        "instance_id": task_doc.get("instance_id")
+                    },
+                    "timestamp": timestamp_ms
+                }
+
+                events.append(event)
+
+            logger.info(f"Retrieved {len(events)} tasks as events")
 
             return {
                 "success": True,
-                "task_id": request.task_id,
-                "mongodb_id": str(result.inserted_id),
-                "status": "pending",
-                "message": "Task submitted successfully"
+                "count": len(events),
+                "events": events
             }
 
         except Exception as e:
-            logger.error(f"❌ [TASK-SUBMIT] Error submitting task: {e}", exc_info=True)
+            logger.error(f"Error listing tasks as events: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail=str(e))
 
     @app.get("/api/tasks/{task_id}")
@@ -1328,10 +1374,10 @@ def create_app() -> FastAPI:
             agent_emoji = agent_definition.get("emoji", "🤖")
 
             # ========================================================================
-            # 4. EMIT WEBSOCKET EVENT + SAVE TO MONGO: task_started
+            # 4. EMIT WEBSOCKET EVENT + SAVE TO MONGO: task_submitted
             # ========================================================================
             try:
-                # Save task to MongoDB with status=processing
+                # Save task to MongoDB with status=pending (task received, waiting for processing)
                 if mongo_db is not None:
                     tasks_collection = mongo_db["tasks"]
                     tasks_collection.insert_one({
@@ -1342,26 +1388,28 @@ def create_app() -> FastAPI:
                         "instance_id": instance_id,
                         "conversation_id": conversation_id,
                         "screenplay_id": screenplay_id,
-                        "status": "processing",
+                        "status": "pending",
                         "created_at": start_time,
                         "updated_at": start_time
                     })
-                    logger.info(f"💾 [GATEWAY] Saved task_started to MongoDB: {task_id}")
+                    logger.info(f"💾 [GATEWAY] Saved task_submitted to MongoDB: {task_id}")
 
-                # Broadcast to WebSocket
-                await gamification_manager.broadcast("task_started", {
+                # Broadcast to WebSocket - task_submitted indicates task is queued
+                await gamification_manager.broadcast("task_submitted", {
                     "task_id": task_id,
                     "agent_id": actual_agent_id,
                     "agent_name": agent_name,
                     "agent_emoji": agent_emoji,
                     "instance_id": instance_id,
-                    "status": "processing",
+                    "conversation_id": conversation_id,
+                    "screenplay_id": screenplay_id,
+                    "status": "pending",
                     "started_at": start_time.isoformat(),
-                    "level": "debug"
+                    "level": "info"
                 })
-                logger.info(f"📡 [GATEWAY] Broadcasted task_started for {agent_name}")
+                logger.info(f"📡 [GATEWAY] Broadcasted task_submitted for {agent_name}")
             except Exception as e:
-                logger.warning(f"⚠️ Failed to save/broadcast task_started event: {e}")
+                logger.warning(f"⚠️ Failed to save/broadcast task_submitted event: {e}")
 
             # ========================================================================
             # 5. CALL CONDUCTOR API (which will build prompt and execute)
@@ -2438,163 +2486,6 @@ def create_app() -> FastAPI:
 
         except Exception as e:
             logger.error(f"Error listing processing tasks: {e}", exc_info=True)
-            raise HTTPException(status_code=500, detail=str(e))
-
-    @app.get("/api/tasks/events")
-    async def list_tasks_as_events(
-        limit: int = Query(50, ge=1, le=200, description="Maximum number of events to return (default: 50, max: 200)"),
-        include_councilors: bool = Query(True, description="Include councilor executions (default: true)"),
-        include_regular: bool = Query(True, description="Include regular agent executions (default: true)")
-    ):
-        """
-        List recent tasks formatted as gamification events for the frontend.
-
-        This endpoint transforms MongoDB task documents into the same event format
-        used by WebSocket real-time events, enabling historical event loading after page reloads.
-
-        Query parameters:
-        - limit: Maximum number of events (default: 50, max: 200)
-        - include_councilors: Include councilor executions (default: true)
-        - include_regular: Include regular agent executions (default: true)
-
-        Returns:
-        - success: Boolean indicating success
-        - count: Number of events returned
-        - events: Array of gamification events with format:
-          {
-            "type": "agent_execution_completed" | "agent_execution_error",
-            "data": {
-              "execution_id": str,
-              "agent_id": str,
-              "agent_name": str,
-              "agent_emoji": str,
-              "status": str,
-              "severity": str,
-              "summary": str,
-              "duration_ms": int,
-              "completed_at": str,
-              "is_councilor": bool,
-              "level": "result" | "debug"
-            },
-            "timestamp": int (milliseconds)
-          }
-        """
-        if mongo_db is None:
-            raise HTTPException(status_code=503, detail="MongoDB connection not available")
-
-        try:
-            tasks_collection = mongo_db["tasks"]
-            agents_collection = mongo_db["agents"]
-
-            # Build query filter
-            query_filter = {"status": {"$in": ["completed", "error"]}}
-
-            # Filter by execution type
-            councilor_filters = []
-            if include_councilors:
-                councilor_filters.append({"is_councilor_execution": True})
-            if include_regular:
-                councilor_filters.append({"is_councilor_execution": {"$ne": True}})
-
-            if councilor_filters:
-                if len(councilor_filters) == 1:
-                    query_filter.update(councilor_filters[0])
-                else:
-                    query_filter["$or"] = councilor_filters
-
-            logger.info(f"Listing tasks as events with filter: {query_filter}, limit={limit}")
-
-            # Query MongoDB sorted by created_at descending (most recent first)
-            # Use created_at instead of completed_at because completed_at may be null for pending tasks
-            cursor = tasks_collection.find(query_filter)
-            cursor = cursor.sort("created_at", -1).limit(limit)
-
-            # Build agent cache to avoid repeated lookups
-            agent_cache = {}
-
-            events = []
-            for task_doc in cursor:
-                agent_id = task_doc.get("agent_id", "unknown")
-
-                # Get agent metadata (cached)
-                if agent_id not in agent_cache:
-                    agent = agents_collection.find_one({"agent_id": agent_id})
-                    if agent:
-                        definition = agent.get("definition", {})
-                        agent_cache[agent_id] = {
-                            "name": definition.get("name", agent_id),
-                            "emoji": definition.get("emoji", "🤖")
-                        }
-                    else:
-                        agent_cache[agent_id] = {
-                            "name": agent_id,
-                            "emoji": "🤖"
-                        }
-
-                agent_meta = agent_cache[agent_id]
-
-                # Determine event type
-                status = task_doc.get("status", "completed")
-                event_type = "agent_execution_error" if status == "error" else "agent_execution_completed"
-
-                # Extract task data - use _id as task_id if task_id not present
-                task_id = task_doc.get("task_id") or str(task_doc.get("_id", ""))
-                severity = task_doc.get("severity", "success")
-                result = task_doc.get("result", "")
-                duration = task_doc.get("duration", 0)
-                completed_at = task_doc.get("completed_at")
-                is_councilor = task_doc.get("is_councilor_execution", False)
-
-                # Generate summary (handle None result)
-                if result:
-                    summary = result[:200] if len(result) > 200 else result
-                    if len(result) > 200:
-                        summary += "..."
-                else:
-                    summary = "Execução concluída"
-
-                # Determine level (result for councilors/errors, debug for regular executions)
-                level = "result" if is_councilor or status == "error" else "debug"
-
-                # Convert timestamp to milliseconds - prefer created_at for ordering consistency
-                created_at = task_doc.get("created_at")
-                timestamp_ms = int(created_at.timestamp() * 1000) if created_at else (int(completed_at.timestamp() * 1000) if completed_at else 0)
-
-                # Build event in same format as WebSocket
-                event = {
-                    "type": event_type,
-                    "data": {
-                        "execution_id": task_id,
-                        "agent_id": agent_id,
-                        "agent_name": agent_meta["name"],
-                        "agent_emoji": agent_meta["emoji"],
-                        "status": status,
-                        "severity": severity,
-                        "summary": summary,
-                        "duration_ms": int(duration * 1000),
-                        "completed_at": completed_at.isoformat() if completed_at else None,
-                        "is_councilor": is_councilor,
-                        "level": level,
-                        # Navigation fields for "open in new tab" feature
-                        "screenplay_id": task_doc.get("screenplay_id"),
-                        "conversation_id": task_doc.get("conversation_id"),
-                        "instance_id": task_doc.get("instance_id")
-                    },
-                    "timestamp": timestamp_ms
-                }
-
-                events.append(event)
-
-            logger.info(f"Retrieved {len(events)} tasks as events")
-
-            return {
-                "success": True,
-                "count": len(events),
-                "events": events
-            }
-
-        except Exception as e:
-            logger.error(f"Error listing tasks as events: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail=str(e))
 
     @app.get("/api/tasks/{task_id}/details")
