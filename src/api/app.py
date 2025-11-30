@@ -549,7 +549,7 @@ def create_app() -> FastAPI:
             logger.info(f"   - input: {input_text[:50]}...")
 
             # ========================================================================
-            # EMIT WEBSOCKET EVENT + SAVE TO MONGO: task_started
+            # EMIT WEBSOCKET EVENT: task_started (MongoDB insert is done by Conductor API)
             # ========================================================================
             try:
                 # Get agent metadata for display
@@ -563,21 +563,7 @@ def create_app() -> FastAPI:
                         agent_name = definition.get("name", agent_id)
                         agent_emoji = definition.get("emoji", "🤖")
 
-                    # Save task to MongoDB with status=processing
-                    tasks_collection = mongo_db["tasks"]
-                    tasks_collection.insert_one({
-                        "task_id": task_id,
-                        "agent_id": agent_id,
-                        "instance_id": instance_id,
-                        "conversation_id": conversation_id,
-                        "screenplay_id": screenplay_id,
-                        "status": "processing",
-                        "created_at": datetime.utcnow(),
-                        "updated_at": datetime.utcnow()
-                    })
-                    logger.info(f"💾 [GATEWAY] Saved task_started to MongoDB: {task_id}")
-
-                # Broadcast to WebSocket
+                # Broadcast to WebSocket (MongoDB insert handled by Conductor API)
                 await gamification_manager.broadcast("task_started", {
                     "task_id": task_id,
                     "agent_id": agent_id,
@@ -589,7 +575,7 @@ def create_app() -> FastAPI:
                 })
                 logger.info(f"📡 [GATEWAY] Broadcasted task_started for {agent_name}")
             except Exception as e:
-                logger.warning(f"⚠️ Failed to save/broadcast task_started event: {e}")
+                logger.warning(f"⚠️ Failed to broadcast task_started event: {e}")
 
             # Create event queue for this job
             event_queue: asyncio.Queue = asyncio.Queue(maxsize=1000)
@@ -1374,27 +1360,11 @@ def create_app() -> FastAPI:
             agent_emoji = agent_definition.get("emoji", "🤖")
 
             # ========================================================================
-            # 4. EMIT WEBSOCKET EVENT + SAVE TO MONGO: task_submitted
+            # 4. EMIT WEBSOCKET EVENT: task_submitted (MongoDB insert is done by Conductor API)
             # ========================================================================
             try:
-                # Save task to MongoDB with status=pending (task received, waiting for processing)
-                if mongo_db is not None:
-                    tasks_collection = mongo_db["tasks"]
-                    tasks_collection.insert_one({
-                        "task_id": task_id,
-                        "agent_id": actual_agent_id,
-                        "agent_name": agent_name,
-                        "agent_emoji": agent_emoji,
-                        "instance_id": instance_id,
-                        "conversation_id": conversation_id,
-                        "screenplay_id": screenplay_id,
-                        "status": "pending",
-                        "created_at": start_time,
-                        "updated_at": start_time
-                    })
-                    logger.info(f"💾 [GATEWAY] Saved task_submitted to MongoDB: {task_id}")
-
                 # Broadcast to WebSocket - task_submitted indicates task is queued
+                # NOTE: MongoDB insert is handled by Conductor API via mongo_task_client.submit_task()
                 await gamification_manager.broadcast("task_submitted", {
                     "task_id": task_id,
                     "agent_id": actual_agent_id,
@@ -1409,7 +1379,7 @@ def create_app() -> FastAPI:
                 })
                 logger.info(f"📡 [GATEWAY] Broadcasted task_submitted for {agent_name}")
             except Exception as e:
-                logger.warning(f"⚠️ Failed to save/broadcast task_submitted event: {e}")
+                logger.warning(f"⚠️ Failed to broadcast task_submitted event: {e}")
 
             # ========================================================================
             # 5. CALL CONDUCTOR API (which will build prompt and execute)
