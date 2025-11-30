@@ -555,7 +555,7 @@ def create_app() -> FastAPI:
                 # Get agent metadata for display
                 agent_name = agent_id
                 agent_emoji = "🤖"
-                if mongo_db:
+                if mongo_db is not None:
                     agents_collection = mongo_db["agents"]
                     agent_doc = agents_collection.find_one({"agent_id": agent_id})
                     if agent_doc:
@@ -2349,8 +2349,8 @@ def create_app() -> FastAPI:
                 status = task_doc.get("status", "completed")
                 event_type = "agent_execution_error" if status == "error" else "agent_execution_completed"
 
-                # Extract task data
-                task_id = task_doc.get("task_id", "")
+                # Extract task data - use _id as task_id if task_id not present
+                task_id = task_doc.get("task_id") or str(task_doc.get("_id", ""))
                 severity = task_doc.get("severity", "success")
                 result = task_doc.get("result", "")
                 duration = task_doc.get("duration", 0)
