@@ -1253,25 +1253,16 @@ def create_app() -> FastAPI:
             # ========================================================================
             # 7. EMIT WEBSOCKET EVENT: agent_execution_completed
             # ========================================================================
-            try:
-                summary = result_text[:200] if result_text else "Sem resultado"
-
-                await gamification_manager.broadcast("agent_execution_completed", {
-                    "agent_id": actual_agent_id,
-                    "agent_name": agent_name,
-                    "agent_emoji": agent_emoji,
-                    "instance_id": instance_id,
-                    "execution_id": execution_id,
-                    "status": task_status,
-                    "severity": severity,
-                    "started_at": start_time.isoformat(),
-                    "completed_at": end_time.isoformat() if hasattr(end_time, 'isoformat') else str(end_time),
-                    "duration_ms": duration_ms,
-                    "level": "result",
-                    "summary": summary
-                })
-            except Exception as e:
-                logger.warning(f"⚠️ Failed to broadcast agent_execution_completed event: {e}")
+            # NOTE: DISABLED - The Watcher now emits task_completed events via /api/internal/task-event
+            # Having both SSE and Watcher emit events was causing duplicate notifications
+            # The Watcher is more reliable as it monitors MongoDB task status changes
+            #
+            # try:
+            #     summary = result_text[:200] if result_text else "Sem resultado"
+            #     await gamification_manager.broadcast("agent_execution_completed", {...})
+            # except Exception as e:
+            #     logger.warning(f"⚠️ Failed to broadcast agent_execution_completed event: {e}")
+            logger.info("📡 [GATEWAY] Skipping agent_execution_completed broadcast (Watcher handles task_completed)")
 
             # ========================================================================
             # 8. UPDATE INSTANCE METADATA (if instance_id provided)
