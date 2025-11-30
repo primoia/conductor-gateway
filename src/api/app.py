@@ -2328,10 +2328,13 @@ def create_app() -> FastAPI:
                 completed_at = task_doc.get("completed_at")
                 is_councilor = task_doc.get("is_councilor_execution", False)
 
-                # Generate summary
-                summary = result[:200] if result else "Execução concluída"
-                if len(result) > 200:
-                    summary += "..."
+                # Generate summary (handle None result)
+                if result:
+                    summary = result[:200] if len(result) > 200 else result
+                    if len(result) > 200:
+                        summary += "..."
+                else:
+                    summary = "Execução concluída"
 
                 # Determine level (result for councilors/errors, debug for regular executions)
                 level = "result" if is_councilor or status == "error" else "debug"
