@@ -28,14 +28,18 @@ from src.api.routers.persona_version import router as persona_version_router
 from src.api.routers.councilor import router as councilor_router
 from src.api.routers.agents import router as agents_router
 from src.api.routers.portfolio import router as portfolio_router, limiter
-from src.api.routers.conversations import router as conversations_router  # 🔥 NOVO: Rotas de conversas
+from src.api.routers.conversations import router as conversations_router
+from src.api.routers.mcp_registry import router as mcp_registry_router, init_mcp_registry_service
+from src.api.routers.mcp_binder import router as mcp_binder_router
 from src.api.models import AgentExecuteRequest
 from src.api.websocket import gamification_manager
 from src.core.database import init_database, close_database
+from src.core.mcp_binder import MCPBinder, init_mcp_binder, get_mcp_binder
 from src.clients.conductor_client import ConductorClient
 from src.config.settings import CONDUCTOR_CONFIG, MONGODB_CONFIG, SERVER_CONFIG
 from src.utils.mcp_utils import init_agent
 from src.services.councilor_scheduler import CouncilorBackendScheduler
+from src.services.mcp_registry_service import MCPRegistryService
 from src.mcps.mcp_manager import MCPManager
 
 logger = logging.getLogger(__name__)
@@ -55,6 +59,9 @@ conductor_client: ConductorClient | None = None
 
 # Councilor Backend Scheduler - will be initialized in lifespan
 councilor_scheduler: CouncilorBackendScheduler | None = None
+
+# MCP Binder - Core component for agent-MCP bindings
+mcp_binder: MCPBinder | None = None
 
 
 def mongo_to_dict(item: dict) -> dict:
@@ -98,21 +105,44 @@ def start_mcp_servers():
 
 async def run_agent_with_queue(job_id: str, payload: dict[str, Any], queue: asyncio.Queue):
     """Execute agent and populate queue with events using native MCPAgent event subscription."""
+    instance_id = None
     try:
         logger.info(f"Starting agent execution for job {job_id}")
 
-        # Initialize agent with conductor_gateway configuration
-        agent_config = {
-            "mcpServers": {
-                "http": {
-                    "url": f"http://localhost:{SERVER_CONFIG['mcp_port']}/sse",
-                    "reconnect": True,
-                    "reconnectInterval": 1000,
-                    "maxReconnectAttempts": 5,
-                    "timeout": 30000,
+        # Extract instance_id and agent_id from payload for binding
+        instance_id = payload.get("instance_id", job_id)
+        agent_id = payload.get("agent_id", "default")
+
+        # Use MCP Binder to resolve MCPs for this agent
+        agent_config = None
+        if mcp_binder:
+            from src.models.mcp_binder import BindRequest
+            bind_request = BindRequest(
+                instance_id=instance_id,
+                agent_id=agent_id,
+                conversation_id=payload.get("conversation_id"),
+                screenplay_id=payload.get("screenplay_id"),
+            )
+            bind_response = await mcp_binder.bind(bind_request)
+            if bind_response.success and bind_response.mcp_servers_config.get("mcpServers"):
+                agent_config = bind_response.mcp_servers_config
+                logger.info(f"Bound MCPs via Binder: {bind_response.bound_mcps}")
+
+        # Fallback to legacy config if binder not available or no MCPs configured
+        if not agent_config or not agent_config.get("mcpServers"):
+            agent_config = {
+                "mcpServers": {
+                    "http": {
+                        "url": f"http://localhost:{SERVER_CONFIG['mcp_port']}/sse",
+                        "reconnect": True,
+                        "reconnectInterval": 1000,
+                        "maxReconnectAttempts": 5,
+                        "timeout": 30000,
+                    }
                 }
             }
-        }
+            logger.info("Using legacy MCP config (no binder or no MCPs configured)")
+
         agent = init_agent(agent_config=agent_config)
 
         # Create event handlers that put events into the queue
@@ -211,6 +241,10 @@ async def run_agent_with_queue(job_id: str, payload: dict[str, Any], queue: asyn
                 "job_id": job_id,
             }
         )
+        # Unbind MCPs when agent finishes
+        if mcp_binder and instance_id:
+            await mcp_binder.unbind(instance_id, reason="Agent execution completed")
+
         # Clean up the stream from active dictionary
         ACTIVE_STREAMS.pop(job_id, None)
         logger.info(f"Cleaned up stream for job {job_id}")
@@ -394,7 +428,21 @@ async def lifespan(app: FastAPI):
         # Initialize screenplay service
         init_screenplay_service(mongo_db)
         logger.info("Initialized ScreenplayService with MongoDB connection")
-        
+
+        # Initialize MCP Registry service
+        init_mcp_registry_service(mongo_db)
+        registry_service = MCPRegistryService(mongo_db)
+        logger.info("Initialized MCPRegistryService with MongoDB connection")
+
+        # Initialize MCP Binder (core component for agent-MCP bindings)
+        global mcp_binder
+        mcp_binder = init_mcp_binder(
+            registry_service=registry_service,
+            db=mongo_db,
+            agents_config_path=CONDUCTOR_CONFIG.get("project_path", "") + "/config/agents"
+        )
+        logger.info("Initialized MCPBinder core component")
+
         # Initialize database for persona service
         init_database()
         logger.info("Initialized database connection for persona service")
@@ -498,7 +546,9 @@ def create_app() -> FastAPI:
     app.include_router(persona_version_router)
     app.include_router(councilor_router)
     app.include_router(portfolio_router)
-    app.include_router(conversations_router)  # 🔥 NOVO: Proxy para conversas globais
+    app.include_router(conversations_router)
+    app.include_router(mcp_registry_router)  # MCP Registry for dynamic discovery
+    app.include_router(mcp_binder_router)    # MCP Binder for agent-MCP bindings
 
     # SSE Streaming Endpoints - Following Plan2 Hybrid REST + EventSource pattern
 
@@ -717,21 +767,44 @@ def create_app() -> FastAPI:
 
             logger.info(f"Executing command: {command[:100]}...")
 
-            # Initialize agent with conductor_gateway configuration
-            agent_config = {
-                "mcpServers": {
-                    "http": {
-                        "url": f"http://localhost:{SERVER_CONFIG['mcp_port']}/sse",
-                        "reconnect": True,
-                        "reconnectInterval": 1000,
-                        "maxReconnectAttempts": 5,
+            # Extract instance_id and agent_id for binding
+            instance_id = payload.get("instance_id", f"execute_{uuid.uuid4().hex[:8]}")
+            agent_id = payload.get("agent_id", "default")
+
+            # Use MCP Binder to resolve MCPs for this agent
+            agent_config = None
+            if mcp_binder:
+                from src.models.mcp_binder import BindRequest
+                bind_request = BindRequest(
+                    instance_id=instance_id,
+                    agent_id=agent_id,
+                )
+                bind_response = await mcp_binder.bind(bind_request)
+                if bind_response.success and bind_response.mcp_servers_config.get("mcpServers"):
+                    agent_config = bind_response.mcp_servers_config
+                    logger.info(f"Bound MCPs via Binder: {bind_response.bound_mcps}")
+
+            # Fallback to legacy config
+            if not agent_config or not agent_config.get("mcpServers"):
+                agent_config = {
+                    "mcpServers": {
+                        "http": {
+                            "url": f"http://localhost:{SERVER_CONFIG['mcp_port']}/sse",
+                            "reconnect": True,
+                            "reconnectInterval": 1000,
+                            "maxReconnectAttempts": 5,
+                        }
                     }
                 }
-            }
-            agent = init_agent(agent_config)
-            result = await agent.run(command)
 
-            return {"status": "success", "result": result}
+            try:
+                agent = init_agent(agent_config)
+                result = await agent.run(command)
+                return {"status": "success", "result": result}
+            finally:
+                # Unbind when done
+                if mcp_binder:
+                    await mcp_binder.unbind(instance_id, reason="Execution completed")
 
         except Exception as e:
             logger.error(f"Error executing command: {e}", exc_info=True)
