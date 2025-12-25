@@ -132,3 +132,130 @@ class ConductorClient:
         except Exception as e:
             logger.error(f"Health check failed: {e}")
             raise
+
+    async def create_agent(
+        self,
+        name: str,
+        description: str,
+        persona_content: str,
+        emoji: str = "🤖",
+        tags: list[str] | None = None,
+        mcp_configs: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """
+        Create a new agent via Conductor API (normalized format).
+
+        Args:
+            name: Name of the agent (must end with _Agent)
+            description: Description of the agent's purpose (10-200 chars)
+            persona_content: Agent persona in Markdown (min 50 chars, must start with #)
+            emoji: Emoji for visual representation
+            tags: Tags for search and organization
+            mcp_configs: List of MCP sidecar names to bind
+
+        Returns:
+            Response from Conductor API with agent_id
+
+        Raises:
+            httpx.HTTPStatusError: If the API returns an error
+        """
+        payload = {
+            "name": name,
+            "description": description,
+            "persona_content": persona_content,
+            "emoji": emoji,
+            "tags": tags or [],
+            "mcp_configs": mcp_configs or [],
+        }
+
+        logger.info("=" * 80)
+        logger.info(f"🛠️ [ConductorClient] Creating new agent (normalized):")
+        logger.info(f"   - name: {name}")
+        logger.info(f"   - description: {description[:50]}...")
+        logger.info(f"   - emoji: {emoji}")
+        logger.info(f"   - tags: {tags}")
+        logger.info(f"   - mcp_configs: {mcp_configs}")
+        logger.info(f"   - persona_content: {persona_content[:50]}...")
+        logger.info("=" * 80)
+
+        try:
+            url = f"{self.base_url}/agents/"
+            logger.info(f"📤 [ConductorClient] POST {url}")
+
+            response = await self.client.post(url, json=payload)
+            response.raise_for_status()
+            result = response.json()
+
+            logger.info("=" * 80)
+            logger.info(f"✅ [ConductorClient] Agent created successfully:")
+            logger.info(f"   - agent_id: {result.get('agent_id')}")
+            logger.info(f"   - message: {result.get('message')}")
+            logger.info("=" * 80)
+
+            return result
+
+        except httpx.HTTPStatusError as e:
+            logger.error(
+                f"HTTP error creating agent '{name}': {e.response.status_code} - "
+                f"{e.response.text}"
+            )
+            raise
+        except httpx.RequestError as e:
+            logger.error(f"Request error creating agent '{name}': {e}")
+            raise
+        except Exception as e:
+            logger.error(f"Unexpected error creating agent '{name}': {e}")
+            raise
+
+    async def list_agents(self) -> list[dict[str, Any]]:
+        """
+        List all available agents from Conductor API.
+
+        Returns:
+            List of agent definitions
+        """
+        try:
+            url = f"{self.base_url}/agents/"
+            logger.info(f"📤 [ConductorClient] GET {url}")
+
+            response = await self.client.get(url)
+            response.raise_for_status()
+            return response.json()
+
+        except httpx.HTTPStatusError as e:
+            logger.error(
+                f"HTTP error listing agents: {e.response.status_code} - "
+                f"{e.response.text}"
+            )
+            raise
+        except Exception as e:
+            logger.error(f"Error listing agents: {e}")
+            raise
+
+    async def list_mcp_sidecars(self) -> dict[str, Any]:
+        """
+        List all discovered MCP sidecars from Conductor API.
+
+        Returns:
+            Dict with count and sidecars list
+        """
+        try:
+            url = f"{self.base_url}/system/mcp/sidecars"
+            logger.info(f"📤 [ConductorClient] GET {url}")
+
+            response = await self.client.get(url)
+            response.raise_for_status()
+            result = response.json()
+
+            logger.info(f"✅ [ConductorClient] Found {result.get('count', 0)} MCP sidecars")
+            return result
+
+        except httpx.HTTPStatusError as e:
+            logger.error(
+                f"HTTP error listing MCP sidecars: {e.response.status_code} - "
+                f"{e.response.text}"
+            )
+            raise
+        except Exception as e:
+            logger.error(f"Error listing MCP sidecars: {e}")
+            raise

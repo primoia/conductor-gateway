@@ -549,6 +549,7 @@ def create_app() -> FastAPI:
     app.include_router(conversations_router)
     app.include_router(mcp_registry_router)  # MCP Registry for dynamic discovery
     app.include_router(mcp_binder_router)    # MCP Binder for agent-MCP bindings
+    app.include_router(agents_router)        # Agents management (create, list, MCP sidecars)
 
     # SSE Streaming Endpoints - Following Plan2 Hybrid REST + EventSource pattern
 
