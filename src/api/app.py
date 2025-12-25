@@ -1211,6 +1211,72 @@ def create_app() -> FastAPI:
             logger.error(f"Error listing tasks as events: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail=str(e))
 
+    # ========================================================================
+    # 🔥 Processing Tasks Endpoint - MUST be before /api/tasks/{task_id}
+    # ========================================================================
+
+    @app.get("/api/tasks/processing")
+    async def list_processing_tasks(
+        limit: int = Query(100, ge=1, le=500, description="Maximum number of results (default: 100, max: 500)"),
+        offset: int = Query(0, ge=0, description="Pagination offset (default: 0)"),
+        sort: str = Query("-created_at", description="Sort field, prefix with '-' for descending (default: -created_at)")
+    ):
+        """
+        List all tasks with status 'processing' with pagination.
+        This is a convenience endpoint, equivalent to GET /api/tasks?status=processing
+
+        Query parameters:
+        - limit: Maximum number of results (default: 100, max: 500)
+        - offset: Pagination offset (default: 0)
+        - sort: Sort field, prefix with '-' for descending (default: -created_at)
+
+        Returns:
+        - success: Boolean indicating success
+        - count: Number of tasks returned
+        - total: Total number of processing tasks
+        - tasks: Array of task documents
+        """
+        if mongo_db is None:
+            raise HTTPException(status_code=503, detail="MongoDB connection not available")
+
+        try:
+            tasks_collection = mongo_db["tasks"]
+
+            # Build query filter for processing status
+            query_filter = {"status": "processing"}
+
+            # Get total count
+            total = tasks_collection.count_documents(query_filter)
+
+            # Parse sort field
+            sort_field = sort.lstrip("-")
+            sort_direction = -1 if sort.startswith("-") else 1
+
+            logger.info(f"Listing processing tasks: limit={limit}, offset={offset}, sort={sort}, total={total}")
+
+            # Query MongoDB with pagination
+            cursor = tasks_collection.find(query_filter)
+            cursor = cursor.sort(sort_field, sort_direction).skip(offset).limit(limit)
+
+            tasks = []
+            for doc in cursor:
+                # Convert MongoDB document to JSON-serializable dict
+                doc = mongo_to_dict(doc)
+                tasks.append(doc)
+
+            logger.info(f"Retrieved {len(tasks)} processing tasks out of {total} total")
+
+            return {
+                "success": True,
+                "count": len(tasks),
+                "total": total,
+                "tasks": tasks
+            }
+
+        except Exception as e:
+            logger.error(f"Error listing processing tasks: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail=str(e))
+
     @app.get("/api/tasks/{task_id}")
     async def get_task_status(task_id: str):
         """
@@ -2468,68 +2534,6 @@ def create_app() -> FastAPI:
 
         except Exception as e:
             logger.error(f"Error listing tasks: {e}", exc_info=True)
-            raise HTTPException(status_code=500, detail=str(e))
-
-    @app.get("/api/tasks/processing")
-    async def list_processing_tasks(
-        limit: int = Query(100, ge=1, le=500, description="Maximum number of results (default: 100, max: 500)"),
-        offset: int = Query(0, ge=0, description="Pagination offset (default: 0)"),
-        sort: str = Query("-created_at", description="Sort field, prefix with '-' for descending (default: -created_at)")
-    ):
-        """
-        List all tasks with status 'processing' with pagination.
-        This is a convenience endpoint, equivalent to GET /api/tasks?status=processing
-
-        Query parameters:
-        - limit: Maximum number of results (default: 100, max: 500)
-        - offset: Pagination offset (default: 0)
-        - sort: Sort field, prefix with '-' for descending (default: -created_at)
-
-        Returns:
-        - success: Boolean indicating success
-        - count: Number of tasks returned
-        - total: Total number of processing tasks
-        - tasks: Array of task documents
-        """
-        if mongo_db is None:
-            raise HTTPException(status_code=503, detail="MongoDB connection not available")
-
-        try:
-            tasks_collection = mongo_db["tasks"]
-
-            # Build query filter for processing status
-            query_filter = {"status": "processing"}
-
-            # Get total count
-            total = tasks_collection.count_documents(query_filter)
-
-            # Parse sort field
-            sort_field = sort.lstrip("-")
-            sort_direction = -1 if sort.startswith("-") else 1
-
-            logger.info(f"Listing processing tasks: limit={limit}, offset={offset}, sort={sort}, total={total}")
-
-            # Query MongoDB with pagination
-            cursor = tasks_collection.find(query_filter)
-            cursor = cursor.sort(sort_field, sort_direction).skip(offset).limit(limit)
-
-            tasks = []
-            for doc in cursor:
-                # Convert MongoDB document to JSON-serializable dict
-                doc = mongo_to_dict(doc)
-                tasks.append(doc)
-
-            logger.info(f"Retrieved {len(tasks)} processing tasks out of {total} total")
-
-            return {
-                "success": True,
-                "count": len(tasks),
-                "total": total,
-                "tasks": tasks
-            }
-
-        except Exception as e:
-            logger.error(f"Error listing processing tasks: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail=str(e))
 
     @app.get("/api/tasks/{task_id}/details")
