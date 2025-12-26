@@ -31,6 +31,7 @@ from src.api.routers.portfolio import router as portfolio_router, limiter
 from src.api.routers.conversations import router as conversations_router
 from src.api.routers.mcp_registry import router as mcp_registry_router, init_mcp_registry_service
 from src.api.routers.mcp_binder import router as mcp_binder_router
+from src.api.routers.navigation import router as navigation_router
 from src.api.models import AgentExecuteRequest
 from src.api.websocket import gamification_manager
 from src.core.database import init_database, close_database
@@ -550,6 +551,7 @@ def create_app() -> FastAPI:
     app.include_router(mcp_registry_router)  # MCP Registry for dynamic discovery
     app.include_router(mcp_binder_router)    # MCP Binder for agent-MCP bindings
     app.include_router(agents_router)        # Agents management (create, list, MCP sidecars)
+    app.include_router(navigation_router)    # Navigation state persistence
 
     # SSE Streaming Endpoints - Following Plan2 Hybrid REST + EventSource pattern
 
