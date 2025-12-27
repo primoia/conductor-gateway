@@ -37,6 +37,16 @@ from ...models.councilor import (
 
 logger = logging.getLogger(__name__)
 
+
+def _datetime_to_str(value) -> Optional[str]:
+    """Convert datetime to ISO string, or return string as-is, or None"""
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return str(value)
+
+
 # Initialize router
 router = APIRouter(
     prefix="/api/councilors",
@@ -375,9 +385,9 @@ async def list_councilor_instances(
                 }),
 
                 "status": instance.get("status", "idle"),
-                "last_execution": instance.get("last_execution"),
-                "created_at": instance.get("created_at"),
-                "updated_at": instance.get("updated_at"),
+                "last_execution": _datetime_to_str(instance.get("last_execution")),
+                "created_at": _datetime_to_str(instance.get("created_at")),
+                "updated_at": _datetime_to_str(instance.get("updated_at")),
 
                 # Agent template data (for backwards compatibility)
                 "agent_name": agent_def.get("name"),
@@ -482,6 +492,73 @@ async def demote_councilor_instance(
         )
 
 
+@router.post(
+    "/instances/{instance_id}/execute-now",
+    response_model=SuccessResponse,
+    status_code=status.HTTP_200_OK
+)
+async def execute_instance_now(
+    instance_id: str = Path(..., description="Instance ID of the councilor to execute"),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+    scheduler: Optional[CouncilorBackendScheduler] = Depends(get_councilor_scheduler)
+):
+    """
+    Execute a councilor instance's task immediately.
+
+    **Path Parameters:**
+    - `instance_id`: Instance ID of the councilor
+
+    **Returns:**
+    - Execution result with status and stats
+    """
+    try:
+        logger.info(f"🚀 [EXECUTE NOW] Triggering instance: {instance_id}")
+
+        # Find instance
+        agent_instances = db.agent_instances
+        instance = await agent_instances.find_one({
+            "instance_id": instance_id,
+            "is_councilor_instance": True,
+            "$or": [
+                {"isDeleted": {"$ne": True}},
+                {"isDeleted": {"$exists": False}}
+            ]
+        })
+
+        if not instance:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Councilor instance '{instance_id}' not found"
+            )
+
+        agent_id = instance.get("agent_id")
+
+        # Execute via scheduler
+        if scheduler:
+            result = await scheduler.execute_councilor_now(agent_id, instance_id)
+            logger.info(f"✅ [EXECUTE NOW] Instance '{instance_id}' executed successfully")
+
+            return SuccessResponse(
+                success=True,
+                message=f"Councilor instance '{instance_id}' executed successfully",
+                execution=result
+            )
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Scheduler not available"
+            )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ [EXECUTE NOW] Error executing instance: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to execute instance: {str(e)}"
+        )
+
+
 @router.patch(
     "/instances/{instance_id}/schedule",
     response_model=ScheduleResponse,
@@ -546,8 +623,8 @@ async def update_instance_schedule(
                     logger.info(f"▶️ [SCHEDULE] Resumed instance '{instance_id}' in scheduler")
                 else:
                     # Remove from scheduler (pause)
-                    job_id = f"councilor_instance_{instance_id}"
-                    scheduler.scheduler.remove_job(job_id, jobstore='default')
+                    # Job ID is just the instance_id (see councilor_scheduler.py line 213)
+                    scheduler.scheduler.remove_job(instance_id, jobstore='default')
                     logger.info(f"⏸️ [SCHEDULE] Paused instance '{instance_id}' in scheduler")
             except Exception as e:
                 logger.warning(f"⚠️ [SCHEDULE] Scheduler update failed: {e}")
@@ -641,6 +718,11 @@ async def update_instance_config(
 
         update_doc["councilor_config"] = councilor_config
         update_doc["updated_at"] = datetime.utcnow()
+
+        # Update cwd if provided
+        if "cwd" in request and request["cwd"]:
+            update_doc["cwd"] = request["cwd"]
+            logger.info(f"📁 [CONFIG] Updating cwd to: {request['cwd']}")
 
         # Update in database
         result = await agent_instances.update_one(

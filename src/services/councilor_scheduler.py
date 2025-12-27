@@ -920,20 +920,67 @@ class CouncilorBackendScheduler:
             })
         return jobs
 
-    async def execute_councilor_now(self, agent_id: str) -> dict:
+    async def execute_councilor_now(self, agent_id: str, instance_id: str = None) -> dict:
         """
         Execute a councilor task immediately (manual trigger)
 
         Args:
             agent_id: Agent ID of the councilor to execute
+            instance_id: Optional instance ID for instance-based councilors
 
         Returns:
             Execution result dict with status, severity, output
         """
-        logger.info(f"🚀 [EXECUTE NOW] Triggering immediate execution for {agent_id}")
+        logger.info(f"🚀 [EXECUTE NOW] Triggering immediate execution for {agent_id} (instance: {instance_id})")
 
         try:
-            # Fetch councilor from database
+            # NEW: Check for instance-based councilor first
+            if instance_id:
+                instance = await self.db.agent_instances.find_one({
+                    "instance_id": instance_id,
+                    "is_councilor_instance": True
+                })
+                if instance:
+                    logger.info(f"🏛️ [EXECUTE NOW] Found councilor instance: {instance_id}")
+                    await self._execute_councilor_instance_task(instance)
+
+                    # Get updated stats
+                    updated_instance = await self.db.agent_instances.find_one({"instance_id": instance_id})
+                    stats = updated_instance.get("statistics", {}) if updated_instance else {}
+
+                    return {
+                        "status": "completed",
+                        "agent_id": agent_id,
+                        "instance_id": instance_id,
+                        "stats": stats
+                    }
+
+            # Also check by agent_id for any instance with this agent
+            instance = await self.db.agent_instances.find_one({
+                "agent_id": agent_id,
+                "is_councilor_instance": True,
+                "$or": [
+                    {"isDeleted": {"$ne": True}},
+                    {"isDeleted": {"$exists": False}}
+                ]
+            })
+
+            if instance:
+                logger.info(f"🏛️ [EXECUTE NOW] Found councilor instance by agent_id: {instance.get('instance_id')}")
+                await self._execute_councilor_instance_task(instance)
+
+                # Get updated stats
+                updated_instance = await self.db.agent_instances.find_one({"instance_id": instance.get("instance_id")})
+                stats = updated_instance.get("statistics", {}) if updated_instance else {}
+
+                return {
+                    "status": "completed",
+                    "agent_id": agent_id,
+                    "instance_id": instance.get("instance_id"),
+                    "stats": stats
+                }
+
+            # LEGACY: Fetch councilor from agents collection
             councilor = await self.agents_collection.find_one({"agent_id": agent_id})
 
             if not councilor:

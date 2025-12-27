@@ -377,10 +377,10 @@ class CouncilorInstance(BaseModel):
     """
     instance_id: str
     agent_id: str
-    screenplay_id: str  # REQUIRED
-    conversation_id: str  # REQUIRED
+    screenplay_id: Optional[str] = None  # May be None for some instances
+    conversation_id: Optional[str] = None  # May be None for some instances
     is_councilor_instance: bool = True
-    councilor_config: CouncilorConfig
+    councilor_config: Optional[CouncilorConfig] = None  # May be None during listing
     customization: Optional[AgentCustomization] = None
     cwd: Optional[str] = None  # Working directory
 
