@@ -719,6 +719,13 @@ async def update_instance_config(
         update_doc["councilor_config"] = councilor_config
         update_doc["updated_at"] = datetime.utcnow()
 
+        # Update display_name if provided (stored in customization)
+        if "display_name" in request and request["display_name"]:
+            customization = instance.get("customization", {}) or {}
+            customization["display_name"] = request["display_name"]
+            update_doc["customization"] = customization
+            logger.info(f"👤 [CONFIG] Updating display_name to: {request['display_name']}")
+
         # Update cwd if provided
         if "cwd" in request and request["cwd"]:
             update_doc["cwd"] = request["cwd"]
