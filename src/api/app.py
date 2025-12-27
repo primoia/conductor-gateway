@@ -274,7 +274,7 @@ async def monitor_task_and_stream(job_id: str, task_id: str, queue: asyncio.Queu
 
         # Poll MongoDB task collection for status updates
         poll_interval = 2.0  # seconds
-        max_duration = 600  # 10 minutes max
+        max_duration = 1800  # 30 minutes max
         start_time = time.time()
         last_status = None
 
@@ -644,7 +644,7 @@ def create_app() -> FastAPI:
                         "task_id": task_id,  # 🔥 Gateway-generated task_id
                         "user_input": input_text,
                         "cwd": cwd,
-                        "timeout": 600,
+                        "timeout": 1800,
                         "provider": ai_provider,
                         "instance_id": instance_id,
                         "conversation_id": conversation_id,
@@ -832,7 +832,7 @@ def create_app() -> FastAPI:
             logger.debug(f"[Proxy /conductor/execute] Full payload: {payload}")
 
             # Forward request to internal conductor-api with custom timeout
-            timeout_value = payload.get("timeout", 600)
+            timeout_value = payload.get("timeout", 1800)
             async with httpx.AsyncClient(timeout=httpx.Timeout(timeout_value + 10)) as client:
                 response = await client.post(url, json=payload)
                 response.raise_for_status()
@@ -868,7 +868,7 @@ def create_app() -> FastAPI:
             agent_id = payload.get("agent_id")
             input_text = payload.get("input_text")
             cwd = payload.get("cwd")
-            timeout = payload.get("timeout", 600)
+            timeout = payload.get("timeout", 1800)
             instance_id = payload.get("instance_id")
 
             if not agent_id or not input_text or not cwd:
@@ -1538,7 +1538,7 @@ def create_app() -> FastAPI:
                 "task_id": task_id,  # 🔥 Gateway-generated task_id
                 "user_input": input_text,  # ← User input only
                 "cwd": final_cwd,
-                "timeout": CONDUCTOR_CONFIG.get("timeout", 600),
+                "timeout": CONDUCTOR_CONFIG.get("timeout", 1800),
                 "provider": ai_provider,
                 "instance_id": instance_id,
                 "conversation_id": conversation_id,  # ← REQUIRED: Pass conversation_id for history
@@ -1554,7 +1554,7 @@ def create_app() -> FastAPI:
             logger.info(f"   - screenplay_id: {screenplay_id}")
             logger.info(f"   - context_mode: {context_mode}")
 
-            async with httpx.AsyncClient(timeout=CONDUCTOR_CONFIG.get("timeout", 600) + 30) as client:
+            async with httpx.AsyncClient(timeout=CONDUCTOR_CONFIG.get("timeout", 1800) + 30) as client:
                 try:
                     response = await client.post(
                         f"{conductor_api_url}/agents/{actual_agent_id}/execute",

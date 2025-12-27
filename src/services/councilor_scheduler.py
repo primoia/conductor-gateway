@@ -325,7 +325,7 @@ class CouncilorBackendScheduler:
                 "task_id": task_id,
                 "user_input": prompt_text,
                 "cwd": cwd,
-                "timeout": 600,
+                "timeout": 1800,
                 "provider": "claude",  # Default provider
                 "instance_id": instance_id,
                 "conversation_id": conversation_id,
@@ -664,7 +664,7 @@ class CouncilorBackendScheduler:
                 prompt=prompt_text,  # ← This is just user input, Conductor will build full prompt
                 instance_id=f"councilor_{agent_id}_{int(start_time.timestamp() * 1000)}",
                 context_mode="stateless",
-                timeout=600
+                timeout=1800
             )
 
             end_time = datetime.utcnow()

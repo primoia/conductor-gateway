@@ -26,7 +26,7 @@ class ConductorAdvancedTools:
             # Use internal API directly - only works inside Docker network
             self.conductor_api_url = CONDUCTOR_CONFIG.get("conductor_api_url", "http://conductor-api:8000")
 
-        self.timeout = CONDUCTOR_CONFIG.get("timeout", 600) # Timeout padrão para chamadas à API
+        self.timeout = CONDUCTOR_CONFIG.get("timeout", 1800) # Timeout padrão para chamadas à API
 
         logger.info(f"ConductorAdvancedTools inicializado com API URL: {self.conductor_api_url}")
 
@@ -107,7 +107,7 @@ class ConductorAdvancedTools:
         result = self._call_conductor_api(endpoint=endpoint, method="POST", payload=payload)
         return self._format_response(result)
 
-    def execute_agent_stateless(self, agent_id: str, input_text: str, cwd: str, timeout: int = 600, instance_id: str = None) -> dict:
+    def execute_agent_stateless(self, agent_id: str, input_text: str, cwd: str, timeout: int = 1800, instance_id: str = None) -> dict:
         """
         Executa um agente usando o endpoint genérico do Conductor CLI.
         Preserva o input original do usuário.
@@ -167,7 +167,7 @@ class ConductorAdvancedTools:
         result = self._call_conductor_api(endpoint=endpoint, method="POST", payload=payload)
         return self._format_response(result)
 
-    def execute_agent_contextual(self, agent_id: str, input_text: str, timeout: int = 600, clear_history: bool = False, instance_id: str = None) -> dict:
+    def execute_agent_contextual(self, agent_id: str, input_text: str, timeout: int = 1800, clear_history: bool = False, instance_id: str = None) -> dict:
         """
         Executa um agente mantendo contexto de conversação usando API genérica.
 
@@ -201,7 +201,7 @@ class ConductorAdvancedTools:
         logger.info(f"[ConductorAdvancedTools] execute_agent_contextual result status: {result.get('status')}")
         return result
 
-    def start_interactive_session(self, agent_id: str, initial_input: str = None, timeout: int = 600, instance_id: str = None) -> dict:
+    def start_interactive_session(self, agent_id: str, initial_input: str = None, timeout: int = 1800, instance_id: str = None) -> dict:
         """
         Inicia uma sessão interativa com um agente usando API genérica.
 

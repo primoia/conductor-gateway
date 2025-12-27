@@ -21,7 +21,7 @@ class ConductorClient:
             base_url: Base URL of the Conductor API
         """
         self.base_url = base_url.rstrip("/")
-        self.client = httpx.AsyncClient(timeout=httpx.Timeout(600.0))
+        self.client = httpx.AsyncClient(timeout=httpx.Timeout(1800.0))
         logger.info(f"ConductorClient initialized with base_url: {self.base_url}")
 
     async def close(self):
@@ -35,7 +35,7 @@ class ConductorClient:
         instance_id: str | None = None,
         context_mode: str = "stateless",
         cwd: str | None = None,
-        timeout: int = 600,
+        timeout: int = 1800,
         ai_provider: str | None = None,
     ) -> dict[str, Any]:
         """

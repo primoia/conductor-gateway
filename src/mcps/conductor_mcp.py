@@ -36,7 +36,7 @@ class ConductorMCP(BaseMCPServer):
     def __init__(self, port: int | None = None):
         config = MCP_REGISTRY["conductor"]
         self.target_url = config["target_url"]
-        self.timeout = CONDUCTOR_CONFIG.get("timeout", 600)
+        self.timeout = CONDUCTOR_CONFIG.get("timeout", 1800)
 
         super().__init__(
             name="conductor",
@@ -85,7 +85,7 @@ class ConductorMCP(BaseMCPServer):
             - agent_id: The exact ID/name of the agent to execute (required)
             - input_text: The input text for the agent (required)
             - cwd: The full file system path where the agent should work (required)
-            - timeout: Execution timeout in seconds (default: 600)
+            - timeout: Execution timeout in seconds (default: 1800)
             - instance_id: Optional instance ID for context isolation
 
             Returns the agent's response.""",
@@ -94,7 +94,7 @@ class ConductorMCP(BaseMCPServer):
             agent_id: str,
             input_text: str,
             cwd: str,
-            timeout: int = 600,
+            timeout: int = 1800,
             instance_id: str | None = None,
         ) -> dict[str, Any]:
             if not agent_id or not input_text or not cwd:
@@ -125,7 +125,7 @@ class ConductorMCP(BaseMCPServer):
             Parameters:
             - agent_id: The ID of the agent to execute (required)
             - input_text: The input text for the agent (required)
-            - timeout: Execution timeout in seconds (default: 600)
+            - timeout: Execution timeout in seconds (default: 1800)
             - clear_history: Whether to clear conversation history (default: False)
             - instance_id: Optional instance ID for context isolation
 
@@ -134,7 +134,7 @@ class ConductorMCP(BaseMCPServer):
         async def execute_agent_contextual(
             agent_id: str,
             input_text: str,
-            timeout: int = 600,
+            timeout: int = 1800,
             clear_history: bool = False,
             instance_id: str | None = None,
         ) -> dict[str, Any]:
@@ -163,7 +163,7 @@ class ConductorMCP(BaseMCPServer):
             Parameters:
             - agent_id: The ID of the agent to start session with (required)
             - initial_input: Optional initial input for the session
-            - timeout: Session timeout in seconds (default: 600)
+            - timeout: Session timeout in seconds (default: 1800)
             - instance_id: Optional instance ID for context isolation
 
             Returns session initialization result.""",
@@ -171,7 +171,7 @@ class ConductorMCP(BaseMCPServer):
         async def start_interactive_session(
             agent_id: str,
             initial_input: str | None = None,
-            timeout: int = 600,
+            timeout: int = 1800,
             instance_id: str | None = None,
         ) -> dict[str, Any]:
             payload = {
