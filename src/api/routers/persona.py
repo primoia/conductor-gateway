@@ -88,6 +88,62 @@ async def update_persona(
         raise HTTPException(status_code=500, detail=f"Erro interno: {str(e)}")
 
 
+@router.put("/{agent_id}/persona/permanent")
+async def update_persona_permanent(
+    agent_id: str = Path(..., description="ID do agente"),
+    persona_data: PersonaUpdate = ...,
+    db: AsyncIOMotorDatabase = Depends(get_database)
+):
+    """
+    Atualiza a persona permanentemente na collection agents.
+
+    - **agent_id**: ID do agente (agent_id, não instance_id)
+    - **persona_data**: Dados atualizados da persona (content)
+
+    Salva diretamente em agents.persona.content, afetando todas as instâncias.
+    """
+    try:
+        from datetime import datetime
+
+        if not persona_data.content:
+            raise HTTPException(status_code=400, detail="Conteúdo da persona é obrigatório")
+
+        agents_collection = db.agents
+
+        # Verificar se o agente existe
+        agent = await agents_collection.find_one({"agent_id": agent_id})
+        if not agent:
+            raise HTTPException(status_code=404, detail=f"Agente '{agent_id}' não encontrado")
+
+        # Atualizar persona diretamente na collection agents
+        result = await agents_collection.update_one(
+            {"agent_id": agent_id},
+            {
+                "$set": {
+                    "persona": {
+                        "content": persona_data.content.strip(),
+                        "updated_at": datetime.utcnow().isoformat(),
+                        "reason": persona_data.metadata.get("reason", "Edição via interface") if persona_data.metadata else "Edição via interface"
+                    }
+                }
+            }
+        )
+
+        if result.modified_count == 0:
+            raise HTTPException(status_code=500, detail="Falha ao atualizar persona")
+
+        return {
+            "success": True,
+            "message": f"Persona do agente '{agent_id}' atualizada permanentemente",
+            "agent_id": agent_id
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erro interno: {str(e)}")
+
+
 @router.delete("/{agent_id}/persona", status_code=204)
 async def delete_persona(
     agent_id: str = Path(..., description="ID do agente"),
