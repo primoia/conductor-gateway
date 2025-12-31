@@ -22,10 +22,6 @@ COPY src/ ./src/
 ENV PATH="/app/.venv/bin:$PATH"
 ENV PYTHONPATH="/app"
 
-# Expose both FastAPI and MCP ports
-EXPOSE 8080
-EXPOSE 8006
-
 # Command to start the server - use uvicorn with factory function
 # timeout-keep-alive controls how long to wait for clients (30 minutes = 1800s)
 CMD ["/app/.venv/bin/uvicorn", "src.api.app:create_app", "--factory", "--host", "0.0.0.0", "--port", "8080", "--timeout-keep-alive", "1800"]
