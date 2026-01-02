@@ -535,7 +535,8 @@ class MCPRegistryService:
         for name in mcp_names:
             doc = self.collection.find_one({"name": name})
             if doc and doc.get("status") != MCPStatus.UNHEALTHY.value:
-                url = doc["url"]
+                # Usar host_url (para Claude CLI no host) se disponível, senão url
+                url = doc.get("host_url") or doc["url"]
                 auth = doc.get("auth")
 
                 # Append auth to URL if present
