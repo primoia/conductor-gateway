@@ -2344,6 +2344,117 @@ def create_app() -> FastAPI:
             logger.error(f"Error updating instance {instance_id}: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail=str(e))
 
+    @app.get("/api/agents/instances/{instance_id}/mcp-configs")
+    async def get_instance_mcp_configs(instance_id: str):
+        """
+        Get MCP configurations for an agent instance.
+
+        Returns:
+        - template_mcps: MCPs inherited from the agent template
+        - instance_mcps: Extra MCPs added to this specific instance
+        - combined: All MCPs that will be used (template + instance)
+        """
+        if mongo_db is None:
+            raise HTTPException(status_code=503, detail="MongoDB connection not available")
+
+        try:
+            agent_instances = mongo_db["agent_instances"]
+            agents_collection = mongo_db["agents"]
+
+            # Get the instance
+            instance = agent_instances.find_one({"instance_id": instance_id})
+            if not instance:
+                raise HTTPException(status_code=404, detail=f"Instance not found: {instance_id}")
+
+            # Get agent template MCPs
+            agent_id = instance.get("agent_id")
+            template_mcps = []
+            if agent_id:
+                agent = agents_collection.find_one({"agent_id": agent_id})
+                if agent:
+                    definition = agent.get("definition", {})
+                    template_mcps = definition.get("mcp_configs", []) or agent.get("mcp_configs", []) or []
+
+            # Get instance-specific MCPs
+            instance_mcps = instance.get("mcp_configs", []) or []
+
+            # Combine (unique values)
+            combined = list(set(template_mcps + instance_mcps))
+
+            logger.info(f"🔌 [MCP] Instance {instance_id} MCPs: template={template_mcps}, instance={instance_mcps}, combined={combined}")
+
+            return {
+                "instance_id": instance_id,
+                "agent_id": agent_id,
+                "template_mcps": template_mcps,
+                "instance_mcps": instance_mcps,
+                "combined": combined
+            }
+
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Error getting instance mcp_configs: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.patch("/api/agents/instances/{instance_id}/mcp-configs")
+    async def update_instance_mcp_configs(instance_id: str, payload: dict[str, Any]):
+        """
+        Update MCP configurations for an agent instance.
+
+        These are EXTRA MCPs that this instance uses on top of the agent template MCPs.
+
+        Request body:
+        - mcp_configs: List of MCP names to assign to this instance
+        """
+        if mongo_db is None:
+            raise HTTPException(status_code=503, detail="MongoDB connection not available")
+
+        try:
+            agent_instances = mongo_db["agent_instances"]
+
+            # Validate instance exists
+            existing = agent_instances.find_one({"instance_id": instance_id})
+            if not existing:
+                raise HTTPException(status_code=404, detail=f"Instance not found: {instance_id}")
+
+            # Get mcp_configs from payload
+            mcp_configs = payload.get("mcp_configs", [])
+
+            # Validate mcp_configs is a list of strings
+            if not isinstance(mcp_configs, list):
+                raise HTTPException(status_code=400, detail="mcp_configs must be a list")
+
+            for mcp in mcp_configs:
+                if not isinstance(mcp, str):
+                    raise HTTPException(status_code=400, detail="Each MCP config must be a string")
+
+            # Update the instance
+            result = agent_instances.update_one(
+                {"instance_id": instance_id},
+                {
+                    "$set": {
+                        "mcp_configs": mcp_configs,
+                        "updated_at": datetime.now().isoformat()
+                    }
+                }
+            )
+
+            logger.info(f"🔌 [MCP] Updated instance {instance_id} mcp_configs: {mcp_configs}")
+
+            return {
+                "success": True,
+                "instance_id": instance_id,
+                "mcp_configs": mcp_configs,
+                "message": f"Updated mcp_configs with {len(mcp_configs)} MCPs"
+            }
+
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Error updating instance mcp_configs: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail=str(e))
+
     @app.delete("/api/agents/instances/{instance_id}")
     async def delete_agent_instance(instance_id: str, hard: bool = False, cascade: bool = False):
         """

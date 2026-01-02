@@ -28,6 +28,16 @@ class AgentCreateRequest(BaseModel):
     mcp_configs: Optional[List[str]] = Field(default=None, description="List of MCP sidecar names to bind")
 
 
+# Request model for agent update
+class AgentUpdateRequest(BaseModel):
+    """Request model for updating an existing agent"""
+    mcp_configs: Optional[List[str]] = Field(default=None, description="List of MCP sidecar names to bind")
+    # Future: add more editable fields as needed
+    # description: Optional[str] = None
+    # emoji: Optional[str] = None
+    # tags: Optional[List[str]] = None
+
+
 # Dependency to get conductor client
 async def get_conductor_client():
     """Get conductor client instance"""
@@ -115,6 +125,109 @@ async def create_agent(
         raise HTTPException(
             status_code=500,
             detail=f"Failed to create agent: {error_msg}"
+        )
+
+
+@router.patch("/agents/{agent_id}")
+async def update_agent(
+    agent_id: str,
+    request: AgentUpdateRequest
+):
+    """
+    Update an existing agent's configuration.
+
+    Currently supports updating:
+    - `mcp_configs`: List of MCP sidecar names to bind
+
+    **Path Parameters:**
+    - `agent_id`: The agent ID (e.g., "MyAgent_Agent")
+
+    **Request Body:**
+    - `mcp_configs`: List of MCP sidecar names (optional)
+
+    **Returns:**
+    - `success`: boolean
+    - `agent`: Updated agent object
+    - `message`: Human-readable message
+    """
+    try:
+        from src.api.app import mongo_db
+        from datetime import datetime, timezone
+
+        if mongo_db is None:
+            raise HTTPException(status_code=503, detail="MongoDB connection not available")
+
+        logger.info(f"📝 Updating agent: {agent_id}")
+        logger.info(f"   - mcp_configs: {request.mcp_configs}")
+
+        agents_collection = mongo_db["agents"]
+
+        # Find the agent
+        agent = agents_collection.find_one({"agent_id": agent_id})
+        if not agent:
+            raise HTTPException(status_code=404, detail=f"Agent not found: {agent_id}")
+
+        # Build update document
+        update_fields = {"updated_at": datetime.now(timezone.utc)}
+
+        if request.mcp_configs is not None:
+            # Update mcp_configs in definition if exists, otherwise at root level
+            if "definition" in agent:
+                update_fields["definition.mcp_configs"] = request.mcp_configs
+            else:
+                update_fields["mcp_configs"] = request.mcp_configs
+
+        # Perform update
+        result = agents_collection.update_one(
+            {"agent_id": agent_id},
+            {"$set": update_fields}
+        )
+
+        if result.modified_count == 0 and result.matched_count == 0:
+            raise HTTPException(status_code=404, detail=f"Agent not found: {agent_id}")
+
+        # Fetch updated agent
+        updated_agent = agents_collection.find_one({"agent_id": agent_id})
+
+        # Build response
+        if "definition" in updated_agent:
+            definition = updated_agent.get("definition", {})
+            agent_response = {
+                "id": str(updated_agent.get("_id", "")),
+                "agent_id": agent_id,
+                "name": definition.get("name", ""),
+                "emoji": definition.get("emoji", "🤖"),
+                "description": definition.get("description", ""),
+                "mcp_configs": definition.get("mcp_configs", []),
+                "tags": definition.get("tags", [])
+            }
+        else:
+            agent_response = {
+                "id": str(updated_agent.get("_id", "")),
+                "agent_id": agent_id,
+                "name": updated_agent.get("name", ""),
+                "emoji": updated_agent.get("emoji", "🤖"),
+                "description": updated_agent.get("description", ""),
+                "mcp_configs": updated_agent.get("mcp_configs", []),
+                "tags": updated_agent.get("tags", [])
+            }
+
+        logger.info(f"✅ Agent updated successfully: {agent_id}")
+
+        return {
+            "success": True,
+            "agent": agent_response,
+            "message": f"Agent '{agent_id}' updated successfully"
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        error_msg = str(e)
+        logger.error(f"❌ Error updating agent: {error_msg}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to update agent: {error_msg}"
         )
 
 

@@ -23,6 +23,8 @@ class MCPStatus(str, Enum):
     HEALTHY = "healthy"
     UNHEALTHY = "unhealthy"
     UNKNOWN = "unknown"
+    STOPPED = "stopped"      # Container parado (on-demand)
+    STARTING = "starting"    # Container iniciando (on-demand)
 
 
 class MCPMetadata(BaseModel):
@@ -75,14 +77,36 @@ class MCPRegistryEntry(BaseModel):
     id: Optional[str] = Field(None, alias="_id", description="MongoDB document ID")
     name: str = Field(..., description="Unique identifier")
     type: MCPType = Field(..., description="Internal or external MCP")
-    url: str = Field(..., description="SSE endpoint URL")
+    url: str = Field(..., description="SSE endpoint URL (Docker internal)")
     backend_url: Optional[str] = Field(None, description="Backend API URL (for external MCPs)")
     auth: Optional[str] = Field(None, description="Auth token to append to URL")
-    status: MCPStatus = Field(MCPStatus.UNKNOWN, description="Current health status")
+    status: MCPStatus = Field(MCPStatus.STOPPED, description="Current health status")
     tools_count: int = Field(0, description="Number of exposed tools")
     last_heartbeat: Optional[datetime] = Field(None, description="Last heartbeat timestamp")
     registered_at: datetime = Field(default_factory=datetime.utcnow, description="Registration timestamp")
     metadata: MCPMetadata = Field(default_factory=MCPMetadata, description="Additional metadata")
+
+    # === ON-DEMAND FIELDS ===
+    host_url: Optional[str] = Field(
+        None,
+        description="URL acessível do host para Watcher (ex: http://localhost:13145/sse)"
+    )
+    docker_compose_path: Optional[str] = Field(
+        None,
+        description="Caminho relativo ao BASE_PATH para docker-compose.centralized.yml"
+    )
+    shutdown_after: Optional[datetime] = Field(
+        None,
+        description="Timestamp após o qual o MCP pode ser desligado"
+    )
+    last_used: Optional[datetime] = Field(
+        None,
+        description="Último uso do MCP por um agente"
+    )
+    auto_shutdown_minutes: int = Field(
+        30,
+        description="Minutos de inatividade antes de permitir shutdown"
+    )
 
     model_config = ConfigDict(
         populate_by_name=True,
@@ -90,11 +114,14 @@ class MCPRegistryEntry(BaseModel):
             "example": {
                 "name": "crm",
                 "type": "external",
-                "url": "http://crm-mcp-sidecar:9201/sse",
-                "backend_url": "http://crm-backend:8001",
+                "url": "http://verticals-crm-mcp:9000/sse",
+                "host_url": "http://localhost:13145/sse",
+                "docker_compose_path": "verticals/primoia-crm/docker-compose.centralized.yml",
+                "backend_url": "http://verticals-crm-api:8000",
                 "auth": "YWRtaW46QWRtaW5AMTIzNDU2",
-                "status": "healthy",
+                "status": "stopped",
                 "tools_count": 43,
+                "auto_shutdown_minutes": 30,
                 "last_heartbeat": "2025-12-20T10:30:00Z",
                 "registered_at": "2025-12-20T10:00:00Z",
                 "metadata": {
@@ -118,6 +145,13 @@ class MCPRegistryEntryResponse(BaseModel):
     last_heartbeat: Optional[datetime] = None
     registered_at: Optional[datetime] = None
     metadata: Optional[MCPMetadata] = None
+
+    # === ON-DEMAND FIELDS ===
+    host_url: Optional[str] = None
+    docker_compose_path: Optional[str] = None
+    shutdown_after: Optional[datetime] = None
+    last_used: Optional[datetime] = None
+    auto_shutdown_minutes: int = 30
 
     model_config = ConfigDict(populate_by_name=True)
 
