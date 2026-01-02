@@ -25,6 +25,7 @@ from src.models.mcp_registry import (
     MCPHealthResponse,
     MCPResolveRequest,
     MCPResolveResponse,
+    MCPConfigResponse,
 )
 from src.services.mcp_registry_service import MCPRegistryService
 
@@ -177,6 +178,45 @@ async def list_mcps(
         external_count=stats["external"],
         healthy_count=stats["healthy"]
     )
+
+
+@router.get(
+    "/config",
+    response_model=MCPConfigResponse,
+    summary="Get MCP config for Claude CLI",
+    description="Get mcpServers config ready for Claude CLI from agent/instance MCPs."
+)
+async def get_mcp_config(
+    instance_id: Optional[str] = Query(None, description="Agent instance ID"),
+    agent_id: Optional[str] = Query(None, description="Agent template ID"),
+    service: MCPRegistryService = Depends(get_registry_service)
+):
+    """
+    Get MCP configuration in Claude CLI format.
+
+    Combines MCPs from:
+    1. Agent template (definition.mcp_configs)
+    2. Instance extras (instance.mcp_configs)
+
+    Returns mcpServers dict ready for Claude CLI --mcp-config.
+
+    Example response:
+    {
+        "mcpServers": {
+            "crm": {"type": "sse", "url": "http://localhost:13145/sse?auth=..."},
+            "prospector": {"type": "sse", "url": "http://localhost:5007/sse"}
+        }
+    }
+    """
+    if not instance_id and not agent_id:
+        raise HTTPException(
+            status_code=400,
+            detail="Either instance_id or agent_id must be provided"
+        )
+
+    config = service.get_mcp_config(instance_id=instance_id, agent_id=agent_id)
+    logger.info(f"MCP config requested: instance={instance_id}, agent={agent_id}, mcps={list(config.mcpServers.keys())}")
+    return config
 
 
 @router.get(

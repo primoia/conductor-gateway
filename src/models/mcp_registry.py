@@ -42,6 +42,7 @@ class MCPRegisterRequest(BaseModel):
     name: str = Field(..., min_length=1, max_length=100, description="Unique identifier for this MCP")
     url: str = Field(..., description="SSE endpoint URL (e.g., http://crm-mcp-sidecar:9201/sse)")
     backend_url: Optional[str] = Field(None, description="URL of the backend API this MCP proxies")
+    auth: Optional[str] = Field(None, description="Auth token (base64 or JWT) to append to URL")
     metadata: Optional[MCPMetadata] = Field(None, description="Optional metadata")
 
     model_config = ConfigDict(
@@ -50,6 +51,7 @@ class MCPRegisterRequest(BaseModel):
                 "name": "crm",
                 "url": "http://crm-mcp-sidecar:9201/sse",
                 "backend_url": "http://crm-backend:8001",
+                "auth": "YWRtaW46QWRtaW5AMTIzNDU2",
                 "metadata": {
                     "category": "verticals",
                     "description": "CRM Lead Management API",
@@ -75,6 +77,7 @@ class MCPRegistryEntry(BaseModel):
     type: MCPType = Field(..., description="Internal or external MCP")
     url: str = Field(..., description="SSE endpoint URL")
     backend_url: Optional[str] = Field(None, description="Backend API URL (for external MCPs)")
+    auth: Optional[str] = Field(None, description="Auth token to append to URL")
     status: MCPStatus = Field(MCPStatus.UNKNOWN, description="Current health status")
     tools_count: int = Field(0, description="Number of exposed tools")
     last_heartbeat: Optional[datetime] = Field(None, description="Last heartbeat timestamp")
@@ -89,6 +92,7 @@ class MCPRegistryEntry(BaseModel):
                 "type": "external",
                 "url": "http://crm-mcp-sidecar:9201/sse",
                 "backend_url": "http://crm-backend:8001",
+                "auth": "YWRtaW46QWRtaW5AMTIzNDU2",
                 "status": "healthy",
                 "tools_count": 43,
                 "last_heartbeat": "2025-12-20T10:30:00Z",
@@ -150,3 +154,36 @@ class MCPResolveResponse(BaseModel):
 
     resolved: dict[str, str] = Field(..., description="Map of name -> URL for found MCPs")
     not_found: list[str] = Field(default_factory=list, description="Names that could not be resolved")
+
+
+class MCPServerConfig(BaseModel):
+    """Single MCP server config for Claude CLI."""
+
+    type: str = Field("sse", description="Transport type (sse)")
+    url: str = Field(..., description="Full URL with auth if applicable")
+
+
+class MCPConfigResponse(BaseModel):
+    """Response model for Claude CLI mcpServers config format."""
+
+    mcpServers: dict[str, MCPServerConfig] = Field(
+        default_factory=dict,
+        description="Map of MCP name -> server config for Claude CLI"
+    )
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "mcpServers": {
+                    "crm": {
+                        "type": "sse",
+                        "url": "http://localhost:13145/sse?auth=YWRtaW46QWRtaW5AMTIzNDU2"
+                    },
+                    "prospector": {
+                        "type": "sse",
+                        "url": "http://localhost:5007/sse"
+                    }
+                }
+            }
+        }
+    )

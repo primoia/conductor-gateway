@@ -22,6 +22,8 @@ from src.models.mcp_registry import (
     MCPRegistryEntry,
     MCPRegistryEntryResponse,
     MCPHealthResponse,
+    MCPServerConfig,
+    MCPConfigResponse,
 )
 from src.mcps.registry import MCP_REGISTRY
 
@@ -134,6 +136,7 @@ class MCPRegistryService:
             "type": MCPType.EXTERNAL.value,
             "url": request.url,
             "backend_url": request.backend_url,
+            "auth": request.auth,
             "status": MCPStatus.HEALTHY.value,
             "tools_count": 0,
             "last_heartbeat": now,
@@ -473,3 +476,77 @@ class MCPRegistryService:
             logger.info(f"Cleaned up {result.deleted_count} stale MCP entries")
 
         return result.deleted_count
+
+    def get_mcp_config(
+        self,
+        instance_id: Optional[str] = None,
+        agent_id: Optional[str] = None
+    ) -> MCPConfigResponse:
+        """
+        Get MCP config in Claude CLI format for an agent or instance.
+
+        Combines MCPs from:
+        1. Agent template (definition.mcp_configs)
+        2. Instance extras (instance.mcp_configs)
+
+        Args:
+            instance_id: Agent instance ID
+            agent_id: Agent template ID
+
+        Returns:
+            MCPConfigResponse with mcpServers dict ready for Claude CLI
+        """
+        mcp_names: set[str] = set()
+
+        # Get agents and instances collections
+        agents_collection = self.db["agents"]
+        instances_collection = self.db["agent_instances"]
+
+        # 1. If instance_id provided, get instance and its agent
+        if instance_id:
+            instance = instances_collection.find_one({"instance_id": instance_id})
+            if instance:
+                # Get MCPs from instance
+                instance_mcps = instance.get("mcp_configs", [])
+                mcp_names.update(instance_mcps)
+                logger.debug(f"Instance {instance_id} MCPs: {instance_mcps}")
+
+                # Get agent_id from instance if not provided
+                if not agent_id:
+                    agent_id = instance.get("agent_id")
+
+        # 2. Get MCPs from agent template
+        if agent_id:
+            agent = agents_collection.find_one({"agent_id": agent_id})
+            if agent:
+                # MCPs can be in definition.mcp_configs or top-level mcp_configs
+                definition = agent.get("definition", {})
+                agent_mcps = definition.get("mcp_configs", []) or agent.get("mcp_configs", [])
+                mcp_names.update(agent_mcps)
+                logger.debug(f"Agent {agent_id} MCPs: {agent_mcps}")
+
+        if not mcp_names:
+            logger.info(f"No MCPs configured for instance={instance_id}, agent={agent_id}")
+            return MCPConfigResponse(mcpServers={})
+
+        # 3. Resolve MCPs from registry
+        mcp_servers: dict[str, MCPServerConfig] = {}
+
+        for name in mcp_names:
+            doc = self.collection.find_one({"name": name})
+            if doc and doc.get("status") != MCPStatus.UNHEALTHY.value:
+                url = doc["url"]
+                auth = doc.get("auth")
+
+                # Append auth to URL if present
+                if auth:
+                    separator = "&" if "?" in url else "?"
+                    url = f"{url}{separator}auth={auth}"
+
+                mcp_servers[name] = MCPServerConfig(type="sse", url=url)
+                logger.debug(f"Resolved MCP {name}: {url}")
+            else:
+                logger.warning(f"MCP {name} not found or unhealthy in registry")
+
+        logger.info(f"Built MCP config with {len(mcp_servers)} servers for instance={instance_id}, agent={agent_id}")
+        return MCPConfigResponse(mcpServers=mcp_servers)
