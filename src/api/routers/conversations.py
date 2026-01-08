@@ -260,7 +260,193 @@ async def delete_message(
     message_id: str = Path(..., description="ID da mensagem")
 ):
     """
-    🔥 NOVO: Marca uma mensagem como deletada (soft delete).
+    🔥 ATUALIZADO: Marca uma mensagem como deletada (soft delete) em AMBAS as collections:
+    - conversations.messages (UI do chat)
+    - tasks (histórico de execuções para PromptEngine)
+
+    Args:
+        conversation_id: ID da conversa
+        message_id: ID da mensagem (UUID)
+
+    Returns:
+        Confirmação de sucesso com detalhes das atualizações
+    """
+    from datetime import datetime
+    from src.config.settings import get_mongodb_client
+
+    try:
+        # Conectar ao MongoDB
+        client = get_mongodb_client()
+        db = client['conductor_state']
+        conversations = db['conversations']
+        tasks = db['tasks']
+
+        # 1. Buscar a mensagem para obter seu conteúdo e timestamp
+        conversation = conversations.find_one(
+            {"conversation_id": conversation_id},
+            {"messages": {"$elemMatch": {"id": message_id}}}
+        )
+
+        message_content = None
+        message_timestamp = None
+        if conversation and "messages" in conversation and len(conversation["messages"]) > 0:
+            msg = conversation["messages"][0]
+            message_content = msg.get("content", "")
+            message_timestamp = msg.get("timestamp")
+
+        # 2. Atualizar a mensagem na collection conversations
+        result_conversations = conversations.update_one(
+            {
+                "conversation_id": conversation_id,
+                "messages.id": message_id
+            },
+            {
+                "$set": {
+                    "messages.$.isDeleted": True,
+                    "updated_at": datetime.utcnow().isoformat()
+                }
+            }
+        )
+
+        if result_conversations.matched_count == 0:
+            raise HTTPException(status_code=404, detail="Mensagem ou conversa não encontrada")
+
+        logger.info(f"✅ Mensagem {message_id} marcada como deletada na conversa {conversation_id}")
+
+        # 3. 🔥 NOVO: Também marcar tasks correspondentes como deletadas
+        # Buscar tasks pelo conversation_id que contenham o conteúdo da mensagem no prompt
+        tasks_updated = 0
+        if message_content:
+            # Buscar tasks que:
+            # - Pertencem à mesma conversa
+            # - Contêm o conteúdo da mensagem no prompt (user_input está embedado no prompt XML)
+            # - Ainda não estão deletadas
+            task_query = {
+                "conversation_id": conversation_id,
+                "isDeleted": {"$ne": True}
+            }
+
+            # Se temos o conteúdo da mensagem, buscar tasks que contenham esse conteúdo
+            # O prompt XML contém o user_input dentro de <user_request>
+            if len(message_content) > 20:
+                # Usar substring para matching (primeiros 100 chars para evitar regex muito longo)
+                search_content = message_content[:100].replace("\\", "\\\\").replace(".", "\\.").replace("*", "\\*")
+                task_query["prompt"] = {"$regex": search_content, "$options": "i"}
+
+            # Atualizar todas as tasks correspondentes
+            result_tasks = tasks.update_many(
+                task_query,
+                {
+                    "$set": {
+                        "isDeleted": True,
+                        "deleted_at": datetime.utcnow().isoformat(),
+                        "deleted_message_id": message_id
+                    }
+                }
+            )
+            tasks_updated = result_tasks.modified_count
+
+            if tasks_updated > 0:
+                logger.info(f"✅ {tasks_updated} task(s) marcada(s) como deletada(s) para conversa {conversation_id}")
+            else:
+                logger.debug(f"ℹ️ Nenhuma task encontrada para marcar como deletada na conversa {conversation_id}")
+
+        return {
+            "success": True,
+            "message": "Mensagem marcada como deletada",
+            "details": {
+                "conversations_updated": result_conversations.modified_count,
+                "tasks_updated": tasks_updated
+            }
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Erro ao deletar mensagem: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Erro ao deletar mensagem: {str(e)}")
+
+
+@router.put("/{conversation_id}/messages/{message_id}/toggle")
+async def toggle_message(
+    conversation_id: str = Path(..., description="ID da conversa"),
+    message_id: str = Path(..., description="ID da mensagem")
+):
+    """
+    Toggle message enabled/disabled state (soft delete).
+    When disabled (isDeleted=true), message won't be included in PromptEngine.
+
+    Args:
+        conversation_id: ID da conversa
+        message_id: ID da mensagem (UUID)
+
+    Returns:
+        Confirmação de sucesso com novo estado
+    """
+    from datetime import datetime
+    from src.config.settings import get_mongodb_client
+
+    try:
+        # Conectar ao MongoDB
+        client = get_mongodb_client()
+        db = client['conductor_state']
+        conversations = db['conversations']
+
+        # 1. Buscar a mensagem atual para obter seu estado
+        conversation = conversations.find_one(
+            {"conversation_id": conversation_id},
+            {"messages": {"$elemMatch": {"id": message_id}}}
+        )
+
+        if not conversation or "messages" not in conversation or len(conversation["messages"]) == 0:
+            raise HTTPException(status_code=404, detail="Mensagem ou conversa não encontrada")
+
+        msg = conversation["messages"][0]
+        current_state = msg.get("isDeleted", False)
+        new_state = not current_state
+
+        # 2. Atualizar a mensagem na collection conversations
+        result = conversations.update_one(
+            {
+                "conversation_id": conversation_id,
+                "messages.id": message_id
+            },
+            {
+                "$set": {
+                    "messages.$.isDeleted": new_state,
+                    "updated_at": datetime.utcnow().isoformat()
+                }
+            }
+        )
+
+        if result.matched_count == 0:
+            raise HTTPException(status_code=404, detail="Mensagem ou conversa não encontrada")
+
+        state_label = "disabled" if new_state else "enabled"
+        logger.info(f"✅ Mensagem {message_id} toggled to {state_label} na conversa {conversation_id}")
+
+        return {
+            "success": True,
+            "message": f"Mensagem {state_label}",
+            "isDeleted": new_state
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Erro ao toggle mensagem: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Erro ao toggle mensagem: {str(e)}")
+
+
+@router.put("/{conversation_id}/messages/{message_id}/hide")
+async def hide_message(
+    conversation_id: str = Path(..., description="ID da conversa"),
+    message_id: str = Path(..., description="ID da mensagem")
+):
+    """
+    Hide message permanently (isHidden=true).
+    Message won't appear in chat or be included in PromptEngine.
+    Only reversible via MongoDB directly.
 
     Args:
         conversation_id: ID da conversa
@@ -278,7 +464,7 @@ async def delete_message(
         db = client['conductor_state']
         conversations = db['conversations']
 
-        # Atualizar a mensagem para marcar como deletada
+        # Atualizar a mensagem para marcar como oculta permanentemente
         result = conversations.update_one(
             {
                 "conversation_id": conversation_id,
@@ -286,7 +472,8 @@ async def delete_message(
             },
             {
                 "$set": {
-                    "messages.$.isDeleted": True,
+                    "messages.$.isHidden": True,
+                    "messages.$.hiddenAt": datetime.utcnow().isoformat(),
                     "updated_at": datetime.utcnow().isoformat()
                 }
             }
@@ -295,15 +482,223 @@ async def delete_message(
         if result.matched_count == 0:
             raise HTTPException(status_code=404, detail="Mensagem ou conversa não encontrada")
 
-        logger.info(f"✅ Mensagem {message_id} marcada como deletada na conversa {conversation_id}")
+        logger.info(f"✅ Mensagem {message_id} ocultada permanentemente na conversa {conversation_id}")
 
-        return {"success": True, "message": "Mensagem marcada como deletada"}
+        return {
+            "success": True,
+            "message": "Mensagem ocultada permanentemente",
+            "isHidden": True
+        }
 
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"❌ Erro ao deletar mensagem: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Erro ao deletar mensagem: {str(e)}")
+        logger.error(f"❌ Erro ao ocultar mensagem: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Erro ao ocultar mensagem: {str(e)}")
+
+
+@router.post("/{conversation_id}/clone")
+async def clone_conversation(
+    conversation_id: str = Path(..., description="ID da conversa a ser clonada")
+):
+    """
+    Clone a conversation with all messages and create new agent instances.
+
+    Creates:
+    - New conversation with copied messages (new IDs)
+    - New agent_instances for each participant (new instance_ids)
+    - Updates message references to new instance_ids
+
+    Keeps:
+    - Same screenplay_id
+    - Same agent_ids (just new instances)
+
+    Args:
+        conversation_id: ID da conversa original
+
+    Returns:
+        Nova conversa clonada com novos IDs
+    """
+    from datetime import datetime
+    from src.config.settings import get_mongodb_client
+    import uuid
+
+    try:
+        client = get_mongodb_client()
+        db = client['conductor_state']
+        conversations = db['conversations']
+        agent_instances = db['agent_instances']
+
+        # 1. Buscar conversa original
+        original = conversations.find_one({"conversation_id": conversation_id})
+        if not original:
+            raise HTTPException(status_code=404, detail="Conversa não encontrada")
+
+        logger.info(f"🔄 Clonando conversa: {conversation_id}")
+
+        # 2. Gerar novo conversation_id
+        new_conversation_id = str(uuid.uuid4())
+        now = datetime.utcnow().isoformat()
+
+        # 3. Buscar TODOS os agent_instances da conversa original (pela collection, não pelos participants)
+        instance_id_map = {}  # old_instance_id -> new_instance_id
+        new_participants = []
+
+        # Buscar agentes pelo conversation_id na collection agent_instances
+        original_instances = list(agent_instances.find({
+            "conversation_id": conversation_id,
+            "isDeleted": {"$ne": True}
+        }))
+
+        logger.info(f"   🔍 Encontradas {len(original_instances)} instâncias de agentes para clonar")
+
+        # 4. Clonar cada agent_instance
+        for original_instance in original_instances:
+            old_instance_id = original_instance.get("instance_id")
+            new_instance_id = str(uuid.uuid4())
+
+            instance_id_map[old_instance_id] = new_instance_id
+
+            # Criar novo documento de instância
+            new_instance_doc = {
+                "instance_id": new_instance_id,
+                "agent_id": original_instance.get("agent_id"),
+                "screenplay_id": original_instance.get("screenplay_id"),  # Mesmo screenplay
+                "conversation_id": new_conversation_id,  # Nova conversa
+                "position": original_instance.get("position", {}),
+                "status": "pending",
+                "cwd": original_instance.get("cwd"),
+                "config": original_instance.get("config"),
+                "emoji": original_instance.get("emoji"),
+                "definition": original_instance.get("definition"),
+                "display_order": original_instance.get("display_order", 0),
+                "created_at": now,
+                "updated_at": now,
+                "last_execution": None,
+                "statistics": {
+                    "task_count": 0,
+                    "total_execution_time": 0.0,
+                    "average_execution_time": 0.0,
+                    "last_task_duration": 0.0,
+                    "last_task_completed_at": None,
+                    "success_count": 0,
+                    "error_count": 0,
+                    "last_exit_code": None,
+                    "total_executions": 0,
+                    "success_rate": 0.0,
+                    "last_execution": None
+                }
+            }
+            agent_instances.insert_one(new_instance_doc)
+            logger.info(f"   ✅ Nova instância criada: {new_instance_id} (clone de {old_instance_id})")
+
+            # Buscar nome do participant original da conversa (mais confiável)
+            original_participant = next(
+                (p for p in original.get("participants", []) if p.get("instance_id") == old_instance_id),
+                None
+            )
+
+            # Criar participant para a nova conversa
+            participant_name = (
+                (original_participant.get("name") if original_participant else None) or
+                original_instance.get("definition", {}).get("name") or
+                original_instance.get("agent_id") or
+                "Agent"
+            )
+            new_participant = {
+                "instance_id": new_instance_id,
+                "agent_id": original_instance.get("agent_id"),
+                "name": participant_name,
+                "emoji": original_instance.get("emoji") or (original_participant.get("emoji") if original_participant else "🤖") or "🤖"
+            }
+            new_participants.append(new_participant)
+            logger.info(f"   👤 Participant criado: {participant_name} ({new_participant['emoji']})")
+
+        # Se não encontrou agentes na collection, copiar dos participants originais
+        if not original_instances and original.get("participants"):
+            logger.info(f"   ⚠️ Nenhuma instância na collection, copiando dos participants")
+            for participant in original.get("participants", []):
+                old_instance_id = participant.get("instance_id")
+                new_instance_id = str(uuid.uuid4())
+
+                if old_instance_id:
+                    instance_id_map[old_instance_id] = new_instance_id
+
+                new_participant = {
+                    **participant,
+                    "instance_id": new_instance_id
+                }
+                new_participants.append(new_participant)
+
+        # 5. Copiar mensagens com novos IDs e atualizando referências
+        # IMPORTANTE: Fazer deep copy para não afetar o original
+        import copy
+        new_messages = []
+        original_messages = original.get("messages", [])
+        logger.info(f"   📝 Copiando {len(original_messages)} mensagens")
+
+        for msg in original_messages:
+            # Deep copy para evitar side effects
+            new_msg = copy.deepcopy(msg)
+            new_msg["id"] = str(uuid.uuid4())
+
+            # Atualizar instance_id do agente na mensagem (se houver)
+            if "agent" in new_msg and new_msg["agent"]:
+                old_inst = new_msg["agent"].get("instance_id")
+                if old_inst and old_inst in instance_id_map:
+                    new_msg["agent"]["instance_id"] = instance_id_map[old_inst]
+
+            new_messages.append(new_msg)
+
+        logger.info(f"   ✅ {len(new_messages)} mensagens copiadas")
+
+        # 6. Atualizar active_agent com novo instance_id
+        new_active_agent = None
+        if original.get("active_agent"):
+            old_active_inst = original["active_agent"].get("instance_id")
+            new_active_agent = {
+                **original["active_agent"],
+                "instance_id": instance_id_map.get(old_active_inst, old_active_inst)
+            }
+
+        # 7. Criar nova conversa
+        # Formatar hora para o título
+        from datetime import datetime as dt
+        hora_clone = dt.now().strftime("%H:%M")
+        new_conversation = {
+            "conversation_id": new_conversation_id,
+            "title": f"{original.get('title', 'Conversa')} (copy {hora_clone})",
+            "created_at": now,
+            "updated_at": now,
+            "screenplay_id": original.get("screenplay_id"),  # Mesmo screenplay
+            "context": original.get("context"),
+            "participants": new_participants,
+            "active_agent": new_active_agent,
+            "messages": new_messages,
+            "display_order": (original.get("display_order", 0) or 0) + 1
+        }
+
+        conversations.insert_one(new_conversation)
+        logger.info(f"✅ Conversa clonada: {new_conversation_id}")
+        logger.info(f"   - {len(new_participants)} participantes clonados")
+        logger.info(f"   - {len(new_messages)} mensagens copiadas")
+
+        # Remover _id do MongoDB antes de retornar
+        new_conversation.pop("_id", None)
+
+        return {
+            "success": True,
+            "message": "Conversa clonada com sucesso",
+            "original_conversation_id": conversation_id,
+            "cloned_conversation": new_conversation,
+            "instance_id_map": instance_id_map
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Erro ao clonar conversa: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Erro ao clonar conversa: {str(e)}")
 
 
 @router.patch("/reorder")
