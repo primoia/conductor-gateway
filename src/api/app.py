@@ -2113,6 +2113,8 @@ def create_app() -> FastAPI:
             for doc in cursor:
                 # Convert MongoDB document to JSON-serializable dict
                 doc = mongo_to_dict(doc)
+                # Check is_councilor_instance field directly on the instance
+                doc["is_councilor"] = doc.get("is_councilor_instance", False)
                 instances.append(doc)
 
             logger.info(f"Retrieved {len(instances)} agent instances")

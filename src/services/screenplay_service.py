@@ -32,6 +32,7 @@ class ScreenplayService:
         """
         self.collection = db["screenplays"]
         self.agent_instances = db["agent_instances"]
+        self.conversations = db["conversations"]
         self._ensure_indexes()
 
     def _ensure_indexes(self):
@@ -463,8 +464,21 @@ class ScreenplayService:
         # Perform update
         self.collection.update_one({"_id": obj_id}, update_doc)
 
-        # If marking as deleted, also mark related agent_instances as deleted
+        # If marking as deleted, also mark related conversations and agent_instances as deleted
         if is_deleted is True:
+            # Mark conversations as deleted
+            conversations_result = self.conversations.update_many(
+                {"screenplay_id": screenplay_id, "isDeleted": {"$ne": True}},
+                {"$set": {"isDeleted": True, "updatedAt": datetime.now(UTC).isoformat()}},
+            )
+
+            if conversations_result.modified_count > 0:
+                logger.info(
+                    f"Marked {conversations_result.modified_count} conversations as deleted "
+                    f"for screenplay: {screenplay_id}"
+                )
+
+            # Mark agent_instances as deleted
             instances_result = self.agent_instances.update_many(
                 {"screenplay_id": screenplay_id, "isDeleted": {"$ne": True}},
                 {"$set": {"isDeleted": True, "updated_at": datetime.now(UTC).isoformat()}},
@@ -475,8 +489,6 @@ class ScreenplayService:
                     f"Marked {instances_result.modified_count} agent_instances as deleted "
                     f"for screenplay: {screenplay_id}"
                 )
-            else:
-                logger.info(f"No agent_instances found for screenplay: {screenplay_id}")
 
         # Fetch and return updated document
         updated_doc = self.collection.find_one({"_id": obj_id})
@@ -632,6 +644,20 @@ class ScreenplayService:
 
         if result.modified_count > 0:
             logger.info(f"Soft deleted screenplay: {screenplay_id}")
+
+            # Mark all related conversations as deleted
+            conversations_result = self.conversations.update_many(
+                {"screenplay_id": screenplay_id, "isDeleted": {"$ne": True}},
+                {"$set": {"isDeleted": True, "updatedAt": datetime.now(UTC).isoformat()}},
+            )
+
+            if conversations_result.modified_count > 0:
+                logger.info(
+                    f"Marked {conversations_result.modified_count} conversations as deleted "
+                    f"for screenplay: {screenplay_id}"
+                )
+            else:
+                logger.info(f"No conversations found for screenplay: {screenplay_id}")
 
             # Mark all related agent_instances as deleted
             instances_result = self.agent_instances.update_many(
