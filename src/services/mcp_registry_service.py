@@ -135,6 +135,7 @@ class MCPRegistryService:
             "name": request.name,
             "type": MCPType.EXTERNAL.value,
             "url": request.url,
+            "host_url": request.host_url,
             "backend_url": request.backend_url,
             "auth": request.auth,
             "status": MCPStatus.HEALTHY.value,

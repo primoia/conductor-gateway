@@ -43,6 +43,7 @@ class MCPRegisterRequest(BaseModel):
 
     name: str = Field(..., min_length=1, max_length=100, description="Unique identifier for this MCP")
     url: str = Field(..., description="SSE endpoint URL (e.g., http://crm-mcp-sidecar:9201/sse)")
+    host_url: Optional[str] = Field(None, description="URL accessible from host machine (e.g., http://localhost:13199/sse)")
     backend_url: Optional[str] = Field(None, description="URL of the backend API this MCP proxies")
     auth: Optional[str] = Field(None, description="Auth token (base64 or JWT) to append to URL")
     metadata: Optional[MCPMetadata] = Field(None, description="Optional metadata")
