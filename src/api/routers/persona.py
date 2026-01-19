@@ -42,25 +42,58 @@ async def create_persona(
         raise HTTPException(status_code=500, detail=f"Erro interno: {str(e)}")
 
 
-@router.get("/{agent_id}/persona", response_model=PersonaResponse)
+@router.get("/{agent_id}/persona")
 async def get_persona(
     agent_id: str = Path(..., description="ID do agente"),
-    service: PersonaService = Depends(get_persona_service)
+    db: AsyncIOMotorDatabase = Depends(get_database)
 ):
     """
     Busca a persona de um agente
-    
+
     - **agent_id**: ID do agente
-    
+
     Retorna a persona se encontrada, 404 se não existir.
     """
     try:
-        persona = await service.get_persona(agent_id)
-        if not persona:
-            raise HTTPException(status_code=404, detail="Persona não encontrada")
-        return persona
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        # Verificar se o agente existe (mesmo padrão do councilor.py)
+        agents_collection = db.agents
+        agent = await agents_collection.find_one({"agent_id": agent_id})
+
+        if not agent:
+            raise HTTPException(status_code=404, detail=f"Agente '{agent_id}' não encontrado")
+
+        # Buscar persona na collection personas
+        personas_collection = db.personas
+        persona_doc = await personas_collection.find_one({"agent_id": agent_id})
+
+        if persona_doc:
+            # Retornar persona da collection personas
+            return {
+                "agent_id": agent_id,
+                "persona_content": persona_doc.get("content", ""),
+                "has_persona": True,
+                "id": str(persona_doc.get("_id", "")),
+                "version": persona_doc.get("version", 1),
+                "created_at": persona_doc.get("created_at"),
+                "updated_at": persona_doc.get("updated_at")
+            }
+
+        # Fallback: buscar persona no próprio documento do agente
+        agent_persona = agent.get("persona", {})
+        persona_content = agent_persona.get("content", "") if isinstance(agent_persona, dict) else ""
+
+        # Também verificar campo 'prompt' como fallback
+        if not persona_content:
+            persona_content = agent.get("prompt", "")
+
+        return {
+            "agent_id": agent_id,
+            "persona_content": persona_content,
+            "has_persona": bool(persona_content)
+        }
+
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Erro interno: {str(e)}")
 
