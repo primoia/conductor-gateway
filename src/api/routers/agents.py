@@ -430,6 +430,59 @@ async def update_agent_full(
         )
 
 
+@router.delete("/agents/{agent_id}")
+async def delete_agent(agent_id: str):
+    """
+    Delete an agent from the system.
+
+    **Path Parameters:**
+    - `agent_id`: The agent ID (e.g., "MyAgent_Agent")
+
+    **Returns:**
+    - `success`: boolean
+    - `agent_id`: The deleted agent ID
+    - `message`: Human-readable message
+    """
+    try:
+        from src.api.app import mongo_db
+
+        if mongo_db is None:
+            raise HTTPException(status_code=503, detail="MongoDB connection not available")
+
+        logger.info(f"🗑️ Deleting agent: {agent_id}")
+
+        agents_collection = mongo_db["agents"]
+
+        # Find the agent first to confirm it exists
+        agent = agents_collection.find_one({"agent_id": agent_id})
+        if not agent:
+            raise HTTPException(status_code=404, detail=f"Agent not found: {agent_id}")
+
+        # Delete the agent
+        result = agents_collection.delete_one({"agent_id": agent_id})
+
+        if result.deleted_count == 0:
+            raise HTTPException(status_code=404, detail=f"Failed to delete agent: {agent_id}")
+
+        logger.info(f"✅ Agent deleted successfully: {agent_id}")
+
+        return {
+            "success": True,
+            "agent_id": agent_id,
+            "message": f"Agent '{agent_id}' deleted successfully"
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        error_msg = str(e)
+        logger.error(f"❌ Error deleting agent: {error_msg}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to delete agent: {error_msg}"
+        )
+
+
 @router.get("/system/mcp/sidecars")
 async def list_mcp_sidecars(client: ConductorClient = Depends(get_conductor_client)):
     """
