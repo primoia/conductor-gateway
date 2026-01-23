@@ -7,6 +7,7 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from src.clients.conductor_client import ConductorClient
+from src.services.qdrant_service import qdrant_service
 
 logger = logging.getLogger(__name__)
 
@@ -505,3 +506,268 @@ async def list_mcp_sidecars(client: ConductorClient = Depends(get_conductor_clie
             status_code=500,
             detail=f"Failed to fetch MCP sidecars: {str(e)}"
         )
+
+
+# ============================================================================
+# AGENT SUGGESTION (Qdrant-based semantic agent matching)
+# ============================================================================
+
+class AgentSuggestRequest(BaseModel):
+    """Request model for agent suggestion"""
+    message: str = Field(..., min_length=1, description="User message to analyze")
+    current_agent_id: Optional[str] = Field(default=None, description="Currently selected agent ID")
+
+
+class AgentSuggestion(BaseModel):
+    """Single agent suggestion"""
+    agent_id: str
+    name: str
+    emoji: str
+    description: str
+    score: float
+    reason: str
+
+
+class AgentSuggestResponse(BaseModel):
+    """Response model for agent suggestion"""
+    suggested: Optional[AgentSuggestion] = None
+    alternatives: List[AgentSuggestion] = []
+    current_is_best: bool = True
+    message: str
+    source: str = "qdrant"  # "qdrant" or "fallback"
+
+
+@router.post("/agents/suggest")
+async def suggest_agent(request: AgentSuggestRequest):
+    """
+    🧠 Suggest the best agent for a given message using semantic search.
+
+    Uses Qdrant vector database with sentence-transformers embeddings
+    for semantic matching between user message and agent capabilities.
+
+    **Request Body:**
+    - `message`: The user's message to analyze
+    - `current_agent_id`: Currently selected agent (optional)
+
+    **Returns:**
+    - `suggested`: Best matching agent (if different from current)
+    - `alternatives`: Other good matches
+    - `current_is_best`: True if current agent is the best match
+    - `message`: Human-readable explanation
+    - `source`: "qdrant" if using vector search, "fallback" otherwise
+    """
+    try:
+        logger.info(f"🧠 [SUGGEST] Analyzing message: {request.message[:50]}...")
+
+        # Try Qdrant first
+        if qdrant_service.is_available():
+            matches = qdrant_service.search_agents(
+                query=request.message,
+                current_agent_id=request.current_agent_id,
+                limit=5,
+                score_threshold=0.3
+            )
+
+            if matches:
+                logger.info(f"🧠 [SUGGEST] Qdrant returned {len(matches)} matches")
+
+                # Best match
+                best = matches[0]
+                current_is_best = (
+                    request.current_agent_id == best["agent_id"] or
+                    best["score"] < 0.35  # Low confidence threshold
+                )
+
+                suggested = AgentSuggestion(
+                    agent_id=best["agent_id"],
+                    name=best["name"],
+                    emoji=best["emoji"] or "🤖",
+                    description=best["description"] or "",
+                    score=best["score"],
+                    reason=best["reason"]
+                )
+
+                alternatives = [
+                    AgentSuggestion(
+                        agent_id=m["agent_id"],
+                        name=m["name"],
+                        emoji=m["emoji"] or "🤖",
+                        description=m["description"] or "",
+                        score=m["score"],
+                        reason=m["reason"]
+                    )
+                    for m in matches[1:4]
+                ]
+
+                if current_is_best:
+                    message = f"✅ Agente atual é o mais adequado"
+                else:
+                    message = f"💡 Sugestão: {suggested.emoji} {suggested.name} ({int(suggested.score * 100)}% match)"
+
+                return AgentSuggestResponse(
+                    suggested=suggested if not current_is_best else None,
+                    alternatives=alternatives,
+                    current_is_best=current_is_best,
+                    message=message,
+                    source="qdrant"
+                )
+
+        # Fallback: No matches or Qdrant not available
+        logger.warning("⚠️ [SUGGEST] Qdrant not available or no matches, using fallback")
+        return AgentSuggestResponse(
+            suggested=None,
+            alternatives=[],
+            current_is_best=True,
+            message="Qdrant não disponível ou agentes não indexados. Execute POST /api/agents/index primeiro.",
+            source="fallback"
+        )
+
+    except Exception as e:
+        logger.error(f"❌ [SUGGEST] Error: {e}")
+        raise HTTPException(status_code=500, detail=f"Error suggesting agent: {str(e)}")
+
+
+@router.post("/agents/index")
+async def index_agents_in_qdrant():
+    """
+    🔄 Index all agents from MongoDB into Qdrant for semantic search.
+
+    This endpoint should be called:
+    - Once after setting up Qdrant
+    - After adding new agents
+    - After updating agent descriptions/tags
+
+    **Returns:**
+    - `success`: True if indexing completed
+    - `indexed_count`: Number of agents indexed
+    - `total_agents`: Total agents in MongoDB
+    - `collection_stats`: Qdrant collection statistics
+    """
+    try:
+        from src.api.app import mongo_db
+
+        if mongo_db is None:
+            raise HTTPException(status_code=503, detail="MongoDB not available")
+
+        if not qdrant_service.is_available():
+            raise HTTPException(
+                status_code=503,
+                detail="Qdrant not available. Check if primoia-shared-qdrant is running."
+            )
+
+        logger.info("🔄 [INDEX] Starting agent indexing...")
+
+        # Fetch all agents from MongoDB
+        agents_collection = mongo_db["agents"]
+        agents_cursor = agents_collection.find({})
+        agents_list = list(agents_cursor)
+
+        if not agents_list:
+            return {
+                "success": True,
+                "indexed_count": 0,
+                "total_agents": 0,
+                "message": "No agents found in MongoDB"
+            }
+
+        # Prepare agents for indexing
+        agents_to_index = []
+        for agent in agents_list:
+            if "definition" in agent:
+                definition = agent.get("definition", {})
+                agent_data = {
+                    "agent_id": agent.get("agent_id", str(agent.get("_id", ""))),
+                    "name": definition.get("name", "") or "",
+                    "emoji": definition.get("emoji") or "🤖",
+                    "description": definition.get("description", "") or "",
+                    "tags": definition.get("tags", []) or []
+                }
+            else:
+                agent_data = {
+                    "agent_id": agent.get("agent_id", str(agent.get("_id", ""))),
+                    "name": agent.get("name", "") or "",
+                    "emoji": agent.get("emoji") or "🤖",
+                    "description": agent.get("description", "") or "",
+                    "tags": agent.get("tags", []) or []
+                }
+
+            agents_to_index.append(agent_data)
+
+        # Index in Qdrant
+        indexed_count = qdrant_service.index_agents_batch(agents_to_index)
+
+        # Get collection stats
+        stats = qdrant_service.get_collection_stats()
+
+        logger.info(f"✅ [INDEX] Indexed {indexed_count}/{len(agents_list)} agents")
+
+        return {
+            "success": True,
+            "indexed_count": indexed_count,
+            "total_agents": len(agents_list),
+            "collection_stats": stats,
+            "message": f"Successfully indexed {indexed_count} agents in Qdrant"
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ [INDEX] Error: {e}")
+        raise HTTPException(status_code=500, detail=f"Error indexing agents: {str(e)}")
+
+
+@router.get("/agents/index/status")
+async def get_index_status():
+    """
+    📊 Get the status of the Qdrant agents index.
+
+    **Returns:**
+    - `qdrant_available`: True if Qdrant is reachable
+    - `collection_exists`: True if agents collection exists
+    - `collection_stats`: Collection statistics (vectors count, etc.)
+    """
+    try:
+        available = qdrant_service.is_available()
+        stats = qdrant_service.get_collection_stats() if available else None
+
+        return {
+            "qdrant_available": available,
+            "collection_exists": stats is not None,
+            "collection_stats": stats,
+            "message": "Qdrant ready" if stats else "Collection not found. Run POST /api/agents/index"
+        }
+
+    except Exception as e:
+        logger.error(f"❌ Error checking index status: {e}")
+        return {
+            "qdrant_available": False,
+            "collection_exists": False,
+            "collection_stats": None,
+            "message": f"Error: {str(e)}"
+        }
+
+
+@router.delete("/agents/index")
+async def delete_agents_index():
+    """
+    🗑️ Delete the Qdrant agents index (for reindexing).
+
+    **Returns:**
+    - `success`: True if deletion completed
+    """
+    try:
+        if not qdrant_service._ensure_client():
+            raise HTTPException(status_code=503, detail="Qdrant not available")
+
+        success = qdrant_service.delete_collection()
+
+        return {
+            "success": success,
+            "message": "Collection deleted" if success else "Could not delete collection"
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Error deleting index: {e}")
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
