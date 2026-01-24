@@ -444,6 +444,13 @@ async def delete_agent(agent_id: str):
     - `agent_id`: The deleted agent ID
     - `message`: Human-readable message
     """
+    # Prevent route collision with /agents/index endpoints
+    if agent_id == "index":
+        raise HTTPException(
+            status_code=400,
+            detail="Use DELETE /api/qdrant/agents-index for index operations"
+        )
+
     try:
         from src.api.app import mongo_db
 
@@ -565,7 +572,7 @@ async def suggest_agent(request: AgentSuggestRequest):
                 query=request.message,
                 current_agent_id=request.current_agent_id,
                 limit=5,
-                score_threshold=0.3
+                score_threshold=0.25  # Lowered threshold for multilingual model
             )
 
             if matches:
@@ -575,7 +582,7 @@ async def suggest_agent(request: AgentSuggestRequest):
                 best = matches[0]
                 current_is_best = (
                     request.current_agent_id == best["agent_id"] or
-                    best["score"] < 0.35  # Low confidence threshold
+                    best["score"] < 0.30  # Low confidence threshold
                 )
 
                 suggested = AgentSuggestion(
@@ -670,9 +677,13 @@ async def index_agents_in_qdrant():
                 "message": "No agents found in MongoDB"
             }
 
-        # Prepare agents for indexing
+        # Prepare agents for indexing with persona content for richer semantic search
         agents_to_index = []
         for agent in agents_list:
+            # Extract persona content (rich text with capabilities)
+            persona = agent.get("persona", {})
+            persona_content = persona.get("content", "") if persona else ""
+
             if "definition" in agent:
                 definition = agent.get("definition", {})
                 agent_data = {
@@ -680,7 +691,8 @@ async def index_agents_in_qdrant():
                     "name": definition.get("name", "") or "",
                     "emoji": definition.get("emoji") or "🤖",
                     "description": definition.get("description", "") or "",
-                    "tags": definition.get("tags", []) or []
+                    "tags": definition.get("tags", []) or [],
+                    "persona_content": persona_content
                 }
             else:
                 agent_data = {
@@ -688,7 +700,8 @@ async def index_agents_in_qdrant():
                     "name": agent.get("name", "") or "",
                     "emoji": agent.get("emoji") or "🤖",
                     "description": agent.get("description", "") or "",
-                    "tags": agent.get("tags", []) or []
+                    "tags": agent.get("tags", []) or [],
+                    "persona_content": persona_content
                 }
 
             agents_to_index.append(agent_data)
@@ -747,7 +760,7 @@ async def get_index_status():
         }
 
 
-@router.delete("/agents/index")
+@router.delete("/qdrant/agents-index")
 async def delete_agents_index():
     """
     🗑️ Delete the Qdrant agents index (for reindexing).
