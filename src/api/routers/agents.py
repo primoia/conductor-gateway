@@ -3,13 +3,19 @@ Agents Router - Proxy endpoints for managing agents via conductor-api
 """
 
 import logging
+import os
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
+import httpx
 from src.clients.conductor_client import ConductorClient
 from src.services.qdrant_service import qdrant_service
 
 logger = logging.getLogger(__name__)
+
+# Knowledge Hub configuration (primary source for agent suggestions)
+KNOWLEDGE_HUB_URL = os.getenv("KNOWLEDGE_HUB_URL", "http://primoia-shared-knowledge-hub-api:8000")
+KNOWLEDGE_HUB_TIMEOUT = float(os.getenv("KNOWLEDGE_HUB_TIMEOUT", "10.0"))
 
 # Initialize router
 router = APIRouter(
@@ -541,91 +547,238 @@ class AgentSuggestResponse(BaseModel):
     alternatives: List[AgentSuggestion] = []
     current_is_best: bool = True
     message: str
-    source: str = "qdrant"  # "qdrant" or "fallback"
+    source: str = "qdrant"  # "knowledge-hub", "qdrant-local", or "fallback"
+
+
+class AgentSuggestCompareResponse(BaseModel):
+    """Response model for comparing both suggestion sources"""
+    knowledge_hub: Optional[AgentSuggestResponse] = None
+    qdrant_local: Optional[AgentSuggestResponse] = None
+    winner: str = ""  # Which source had better top match
+    comparison: str = ""  # Human-readable comparison
+
+
+async def _suggest_via_knowledge_hub(message: str, current_agent_id: Optional[str]) -> Optional[AgentSuggestResponse]:
+    """
+    Try to get agent suggestion from Knowledge Hub API.
+    Returns None if Knowledge Hub is unavailable or returns an error.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=KNOWLEDGE_HUB_TIMEOUT) as client:
+            response = await client.post(
+                f"{KNOWLEDGE_HUB_URL}/api/v1/suggest-agent",
+                json={
+                    "message": message,
+                    "current_agent_id": current_agent_id,
+                }
+            )
+            response.raise_for_status()
+            data = response.json()
+
+            # Parse response into our models
+            suggested = None
+            if data.get("suggested"):
+                s = data["suggested"]
+                suggested = AgentSuggestion(
+                    agent_id=s["agent_id"],
+                    name=s["name"],
+                    emoji=s.get("emoji", "🤖"),
+                    description=s.get("description", ""),
+                    score=s["score"],
+                    reason=s["reason"],
+                )
+
+            alternatives = [
+                AgentSuggestion(
+                    agent_id=a["agent_id"],
+                    name=a["name"],
+                    emoji=a.get("emoji", "🤖"),
+                    description=a.get("description", ""),
+                    score=a["score"],
+                    reason=a["reason"],
+                )
+                for a in data.get("alternatives", [])
+            ]
+
+            return AgentSuggestResponse(
+                suggested=suggested,
+                alternatives=alternatives,
+                current_is_best=data.get("current_is_best", True),
+                message=data.get("message", ""),
+                source="knowledge-hub",
+            )
+
+    except httpx.TimeoutException:
+        logger.warning(f"⚠️ [SUGGEST] Knowledge Hub timeout after {KNOWLEDGE_HUB_TIMEOUT}s")
+        return None
+    except httpx.HTTPStatusError as e:
+        logger.warning(f"⚠️ [SUGGEST] Knowledge Hub HTTP error: {e.response.status_code}")
+        return None
+    except Exception as e:
+        logger.warning(f"⚠️ [SUGGEST] Knowledge Hub error: {e}")
+        return None
+
+
+async def _suggest_via_local_qdrant(message: str, current_agent_id: Optional[str]) -> Optional[AgentSuggestResponse]:
+    """
+    Fallback: Get agent suggestion from local Qdrant with sentence-transformers.
+    Returns None if Qdrant is unavailable or returns no matches.
+    """
+    if not qdrant_service.is_available():
+        return None
+
+    matches = qdrant_service.search_agents(
+        query=message,
+        current_agent_id=current_agent_id,
+        limit=5,
+        score_threshold=0.25
+    )
+
+    if not matches:
+        return None
+
+    logger.info(f"🧠 [SUGGEST] Local Qdrant returned {len(matches)} matches")
+
+    best = matches[0]
+    current_is_best = (
+        current_agent_id == best["agent_id"] or
+        best["score"] < 0.30
+    )
+
+    suggested = AgentSuggestion(
+        agent_id=best["agent_id"],
+        name=best["name"],
+        emoji=best["emoji"] or "🤖",
+        description=best["description"] or "",
+        score=best["score"],
+        reason=best["reason"]
+    )
+
+    alternatives = [
+        AgentSuggestion(
+            agent_id=m["agent_id"],
+            name=m["name"],
+            emoji=m["emoji"] or "🤖",
+            description=m["description"] or "",
+            score=m["score"],
+            reason=m["reason"]
+        )
+        for m in matches[1:4]
+    ]
+
+    if current_is_best:
+        msg = "✅ Agente atual é o mais adequado"
+    else:
+        msg = f"💡 Sugestão: {suggested.emoji} {suggested.name} ({int(suggested.score * 100)}% match)"
+
+    return AgentSuggestResponse(
+        suggested=suggested if not current_is_best else None,
+        alternatives=alternatives,
+        current_is_best=current_is_best,
+        message=msg,
+        source="qdrant-local"
+    )
 
 
 @router.post("/agents/suggest")
-async def suggest_agent(request: AgentSuggestRequest):
+async def suggest_agent(request: AgentSuggestRequest, compare: bool = False):
     """
     🧠 Suggest the best agent for a given message using semantic search.
 
-    Uses Qdrant vector database with sentence-transformers embeddings
-    for semantic matching between user message and agent capabilities.
+    Uses Knowledge Hub API (OpenAI embeddings) as primary source,
+    with fallback to local Qdrant (sentence-transformers) if unavailable.
+
+    **Query Parameters:**
+    - `compare`: If true, returns results from BOTH sources for comparison
 
     **Request Body:**
     - `message`: The user's message to analyze
     - `current_agent_id`: Currently selected agent (optional)
 
-    **Returns:**
+    **Returns (normal mode):**
     - `suggested`: Best matching agent (if different from current)
     - `alternatives`: Other good matches
     - `current_is_best`: True if current agent is the best match
     - `message`: Human-readable explanation
-    - `source`: "qdrant" if using vector search, "fallback" otherwise
+    - `source`: "knowledge-hub", "qdrant-local", or "fallback"
+
+    **Returns (compare mode):**
+    - `knowledge_hub`: Results from Knowledge Hub (OpenAI embeddings)
+    - `qdrant_local`: Results from local Qdrant (sentence-transformers)
+    - `winner`: Which source had the better top match
+    - `comparison`: Human-readable comparison
     """
     try:
-        logger.info(f"🧠 [SUGGEST] Analyzing message: {request.message[:50]}...")
+        logger.info(f"🧠 [SUGGEST] Analyzing message: {request.message[:50]}... (compare={compare})")
 
-        # Try Qdrant first
-        if qdrant_service.is_available():
-            matches = qdrant_service.search_agents(
-                query=request.message,
-                current_agent_id=request.current_agent_id,
-                limit=5,
-                score_threshold=0.25  # Lowered threshold for multilingual model
+        # COMPARE MODE: Return both sources
+        if compare:
+            import asyncio
+
+            # Call both sources in parallel
+            kh_task = _suggest_via_knowledge_hub(request.message, request.current_agent_id)
+            ql_task = _suggest_via_local_qdrant(request.message, request.current_agent_id)
+
+            kh_result, ql_result = await asyncio.gather(kh_task, ql_task)
+
+            # Determine winner
+            kh_score = kh_result.suggested.score if kh_result and kh_result.suggested else 0
+            ql_score = ql_result.suggested.score if ql_result and ql_result.suggested else 0
+
+            kh_agent = kh_result.suggested.agent_id if kh_result and kh_result.suggested else "none"
+            ql_agent = ql_result.suggested.agent_id if ql_result and ql_result.suggested else "none"
+
+            if kh_score > ql_score:
+                winner = "knowledge-hub"
+            elif ql_score > kh_score:
+                winner = "qdrant-local"
+            else:
+                winner = "tie"
+
+            # Build comparison text
+            comparison_lines = []
+            comparison_lines.append(f"Knowledge Hub: {kh_agent} ({kh_score:.0%})" if kh_result else "Knowledge Hub: unavailable")
+            comparison_lines.append(f"Qdrant Local:  {ql_agent} ({ql_score:.0%})" if ql_result else "Qdrant Local: unavailable")
+            comparison_lines.append(f"Winner: {winner}")
+
+            if kh_agent == ql_agent and kh_agent != "none":
+                comparison_lines.append("✅ Ambos concordam no melhor agente!")
+            elif kh_agent != "none" and ql_agent != "none":
+                comparison_lines.append("⚠️ Divergência: cada fonte sugere um agente diferente")
+
+            return AgentSuggestCompareResponse(
+                knowledge_hub=kh_result,
+                qdrant_local=ql_result,
+                winner=winner,
+                comparison="\n".join(comparison_lines)
             )
 
-            if matches:
-                logger.info(f"🧠 [SUGGEST] Qdrant returned {len(matches)} matches")
+        # NORMAL MODE: Primary with fallback
+        # 1. Try Knowledge Hub first (OpenAI embeddings)
+        result = await _suggest_via_knowledge_hub(
+            request.message,
+            request.current_agent_id
+        )
+        if result:
+            logger.info(f"🧠 [SUGGEST] Using Knowledge Hub response")
+            return result
 
-                # Best match
-                best = matches[0]
-                current_is_best = (
-                    request.current_agent_id == best["agent_id"] or
-                    best["score"] < 0.30  # Low confidence threshold
-                )
+        # 2. Fallback to local Qdrant (sentence-transformers)
+        logger.info(f"🧠 [SUGGEST] Falling back to local Qdrant")
+        result = await _suggest_via_local_qdrant(
+            request.message,
+            request.current_agent_id
+        )
+        if result:
+            return result
 
-                suggested = AgentSuggestion(
-                    agent_id=best["agent_id"],
-                    name=best["name"],
-                    emoji=best["emoji"] or "🤖",
-                    description=best["description"] or "",
-                    score=best["score"],
-                    reason=best["reason"]
-                )
-
-                alternatives = [
-                    AgentSuggestion(
-                        agent_id=m["agent_id"],
-                        name=m["name"],
-                        emoji=m["emoji"] or "🤖",
-                        description=m["description"] or "",
-                        score=m["score"],
-                        reason=m["reason"]
-                    )
-                    for m in matches[1:4]
-                ]
-
-                if current_is_best:
-                    message = f"✅ Agente atual é o mais adequado"
-                else:
-                    message = f"💡 Sugestão: {suggested.emoji} {suggested.name} ({int(suggested.score * 100)}% match)"
-
-                return AgentSuggestResponse(
-                    suggested=suggested if not current_is_best else None,
-                    alternatives=alternatives,
-                    current_is_best=current_is_best,
-                    message=message,
-                    source="qdrant"
-                )
-
-        # Fallback: No matches or Qdrant not available
-        logger.warning("⚠️ [SUGGEST] Qdrant not available or no matches, using fallback")
+        # 3. No results from either source
+        logger.warning("⚠️ [SUGGEST] No results from Knowledge Hub or local Qdrant")
         return AgentSuggestResponse(
             suggested=None,
             alternatives=[],
             current_is_best=True,
-            message="Qdrant não disponível ou agentes não indexados. Execute POST /api/agents/index primeiro.",
+            message="Nenhum agente encontrado. Verifique se os agentes estão indexados.",
             source="fallback"
         )
 
