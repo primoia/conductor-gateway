@@ -672,7 +672,7 @@ async def _suggest_via_local_qdrant(message: str, current_agent_id: Optional[str
         msg = f"💡 Sugestão: {suggested.emoji} {suggested.name} ({int(suggested.score * 100)}% match)"
 
     return AgentSuggestResponse(
-        suggested=suggested if not current_is_best else None,
+        suggested=suggested,  # Always return best match for A/B comparison
         alternatives=alternatives,
         current_is_best=current_is_best,
         message=msg,
