@@ -48,6 +48,9 @@ class MCPManager:
         elif name == "conductor":
             from src.mcps.conductor_mcp import ConductorMCP
             return ConductorMCP
+        elif name == "observations":
+            from src.mcps.observations_mcp import ObservationsMCP
+            return ObservationsMCP
         else:
             raise ValueError(f"Unknown MCP: {name}")
 

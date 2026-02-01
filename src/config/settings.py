@@ -21,6 +21,8 @@ def load_config():
             "scripts_path": "scripts",
             "timeout": 1800,
             "conductor_api_url": "http://conductor-api:8000",
+            "construction_api_url": "http://verticals-construction-api-projects:8001",
+            "observation_timeout_seconds": 10,
         },
         "mongodb": {
             "url": os.getenv("MONGODB_URL", "mongodb://admin:czrimr@mongodb:27017/?authSource=admin"),
@@ -59,6 +61,12 @@ def load_config():
     )
     config["conductor"]["conductor_api_url"] = os.getenv(
         "CONDUCTOR_API_URL", config["conductor"]["conductor_api_url"]
+    )
+    config["conductor"]["construction_api_url"] = os.getenv(
+        "CONSTRUCTION_API_URL", config["conductor"]["construction_api_url"]
+    )
+    config["conductor"]["observation_timeout_seconds"] = int(
+        os.getenv("OBSERVATION_TIMEOUT_SECONDS", config["conductor"]["observation_timeout_seconds"])
     )
 
     config["mongodb"]["url"] = os.getenv("MONGODB_URL", config["mongodb"]["url"])

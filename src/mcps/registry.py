@@ -35,6 +35,11 @@ MCP_REGISTRY: dict[str, MCPConfig] = {
         "description": "Execute Conductor agents",
         "target_url": os.getenv("CONDUCTOR_API_URL", "http://conductor-api:8000"),
     },
+    "observations": {
+        "port": int(os.getenv("MCP_OBSERVATIONS_PORT", "5010")),
+        "description": "Task observations for dynamic world_state injection",
+        "target_url": os.getenv("CONDUCTOR_API_URL", "http://conductor-api:8000"),
+    },
 }
 
 
