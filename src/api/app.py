@@ -1502,6 +1502,32 @@ def create_app() -> FastAPI:
             agent_emoji = agent_definition.get("emoji", "🤖")
 
             # ========================================================================
+            # 3.5. SAVE USER INPUT + BOT PLACEHOLDER TO CONVERSATION (server-side)
+            # ========================================================================
+            bot_msg_id = None
+            if request.save_to_conversation and conversation_id:
+                import uuid as uuid_mod
+                conversations_col = mongo_db["conversations"]
+                now_ts = datetime.utcnow().isoformat()
+                user_msg_id = str(uuid_mod.uuid4())
+                bot_msg_id = str(uuid_mod.uuid4())
+
+                user_msg = {"id": user_msg_id, "type": "user", "content": input_text, "timestamp": now_ts}
+                bot_msg = {
+                    "id": bot_msg_id, "type": "bot",
+                    "content": "Aguardando processamento...",
+                    "timestamp": now_ts, "status": "pending", "task_id": task_id,
+                    "agent": {"agent_id": actual_agent_id, "instance_id": instance_id,
+                              "name": agent_name, "emoji": agent_emoji}
+                }
+                conversations_col.update_one(
+                    {"conversation_id": conversation_id},
+                    {"$push": {"messages": {"$each": [user_msg, bot_msg]}},
+                     "$set": {"updated_at": now_ts}}
+                )
+                logger.info(f"💾 [GATEWAY] Saved user input + bot placeholder to conversation {conversation_id}")
+
+            # ========================================================================
             # 4. EMIT WEBSOCKET EVENT: task_submitted (MongoDB insert is done by Conductor API)
             # ========================================================================
             try:
@@ -1584,6 +1610,9 @@ def create_app() -> FastAPI:
             # 6. EXTRACT RESULT FROM CONDUCTOR API RESPONSE
             # ========================================================================
             result_text = conductor_result.get("result", "")
+            # Ensure result_text is a string (Conductor may return dict/object)
+            if not isinstance(result_text, str):
+                result_text = str(result_text) if result_text else ""
             exit_code = conductor_result.get("exit_code", 0)
             duration = conductor_result.get("duration", 0)
             severity = conductor_result.get("severity")
@@ -1607,7 +1636,8 @@ def create_app() -> FastAPI:
             logger.info(f"   - Severity: {severity}")
             logger.info(f"   - Exit code: {exit_code}")
             logger.info(f"   - Duration: {duration_ms}ms")
-            logger.info(f"   - Result length: {len(result_text)} chars")
+            logger.info(f"   - Result length: {len(result_text) if isinstance(result_text, str) else 'NOT_STRING'} chars")
+            logger.info(f"   - save_to_conversation: {request.save_to_conversation}, bot_msg_id: {bot_msg_id}")
 
             # ========================================================================
             # 7. EMIT WEBSOCKET EVENT + UPDATE MONGO: task_completed
@@ -1648,6 +1678,27 @@ def create_app() -> FastAPI:
                 logger.info(f"📡 [GATEWAY] Broadcasted task_completed for {agent_name}")
             except Exception as e:
                 logger.warning(f"⚠️ Failed to update/broadcast task_completed event: {e}")
+
+            # ========================================================================
+            # 7.5. UPDATE BOT PLACEHOLDER IN CONVERSATION WITH REAL RESULT
+            # ========================================================================
+            if request.save_to_conversation and conversation_id and bot_msg_id:
+                try:
+                    conversations_col = mongo_db["conversations"]
+                    final_content = result_text if task_status == "completed" else f"Erro na execucao (exit_code: {exit_code})"
+                    update_result = conversations_col.update_one(
+                        {"conversation_id": conversation_id, "messages.id": bot_msg_id},
+                        {"$set": {
+                            "messages.$.content": final_content,
+                            "messages.$.status": task_status,
+                            "messages.$.completed_at": end_time.isoformat()
+                        }}
+                    )
+                    logger.info(f"💾 [GATEWAY] Updated bot placeholder in conversation {conversation_id} -> {task_status} (matched={update_result.matched_count}, modified={update_result.modified_count})")
+                    if update_result.matched_count == 0:
+                        logger.error(f"❌ [GATEWAY] Bot placeholder NOT FOUND! conversation_id={conversation_id}, bot_msg_id={bot_msg_id}")
+                except Exception as e:
+                    logger.warning(f"⚠️ Failed to update bot placeholder in conversation: {e}")
 
             # ========================================================================
             # 8. UPDATE INSTANCE METADATA (if instance_id provided)
@@ -1695,11 +1746,33 @@ def create_app() -> FastAPI:
                 "duration_ms": duration_ms,
             }
 
-        except HTTPException:
+        except HTTPException as he:
+            # Mark bot placeholder as error before re-raising
+            if request.save_to_conversation and conversation_id and bot_msg_id:
+                try:
+                    conversations_col = mongo_db["conversations"]
+                    conversations_col.update_one(
+                        {"conversation_id": conversation_id, "messages.id": bot_msg_id},
+                        {"$set": {"messages.$.content": f"Erro: {he.detail}", "messages.$.status": "error"}}
+                    )
+                except Exception:
+                    pass
             raise
         except Exception as e:
             error_msg = str(e)
             logger.error(f"❌ Error executing agent {agent_id}: {e}", exc_info=True)
+
+            # If save_to_conversation was active and bot_msg_id was generated, mark error
+            if request.save_to_conversation and conversation_id and bot_msg_id:
+                try:
+                    conversations_col = mongo_db["conversations"]
+                    conversations_col.update_one(
+                        {"conversation_id": conversation_id, "messages.id": bot_msg_id},
+                        {"$set": {"messages.$.content": f"Erro: {error_msg}", "messages.$.status": "error"}}
+                    )
+                except Exception:
+                    pass
+
             raise HTTPException(status_code=500, detail=error_msg)
 
     @app.post("/api/agents/instances")

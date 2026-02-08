@@ -18,3 +18,4 @@ class AgentExecuteRequest(BaseModel):
     document_id: Optional[str] = None  # Deprecated, mantido para compatibilidade
     position: Optional[dict[str, Any]] = None
     ai_provider: Optional[str] = None
+    save_to_conversation: Optional[bool] = False
