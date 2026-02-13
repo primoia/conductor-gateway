@@ -42,11 +42,15 @@ from src.utils.mcp_utils import init_agent
 from src.services.councilor_scheduler import CouncilorBackendScheduler
 from src.services.mcp_registry_service import MCPRegistryService
 from src.mcps.mcp_manager import MCPManager
+from src.services.sse_event_consumer import SSEEventConsumer
 
 logger = logging.getLogger(__name__)
 
 # Global MCP Manager instance
 mcp_manager = MCPManager()
+
+# Global SSE Event Consumer for tool call live events
+sse_event_consumer: SSEEventConsumer | None = None
 
 # SSE Stream Manager - Global dictionary to manage active streams
 ACTIVE_STREAMS: dict[str, asyncio.Queue] = {}
@@ -128,6 +132,36 @@ async def run_agent_with_queue(job_id: str, payload: dict[str, Any], queue: asyn
             if bind_response.success and bind_response.mcp_servers_config.get("mcpServers"):
                 agent_config = bind_response.mcp_servers_config
                 logger.info(f"Bound MCPs via Binder: {bind_response.bound_mcps}")
+
+            # Start SSE event listeners for live tool call events
+            if sse_event_consumer and bind_response.bound_mcps:
+                try:
+                    # Resolve sidecar URLs from registry
+                    sidecar_urls = {}
+                    if mongo_db:
+                        registry_collection = mongo_db["mcp_registry"]
+                        for mcp_name in bind_response.bound_mcps:
+                            doc = registry_collection.find_one({"name": mcp_name})
+                            if doc:
+                                # Use internal Docker URL (not host_url) since BFF runs inside Docker
+                                internal_url = doc.get("url", "").replace("/sse", "")
+                                if internal_url:
+                                    sidecar_urls[mcp_name] = internal_url
+
+                    if sidecar_urls:
+                        await sse_event_consumer.start_listening(
+                            sidecar_urls=sidecar_urls,
+                            context={
+                                "agent_id": agent_id,
+                                "instance_id": instance_id,
+                                "conversation_id": payload.get("conversation_id", ""),
+                                "screenplay_id": payload.get("screenplay_id", ""),
+                                "job_id": job_id
+                            }
+                        )
+                        logger.info(f"SSE event listeners started for: {list(sidecar_urls.keys())}")
+                except Exception as e:
+                    logger.warning(f"Failed to start SSE event listeners: {e}")
 
         # Fallback to legacy config if binder not available or no MCPs configured
         if not agent_config or not agent_config.get("mcpServers"):
@@ -242,6 +276,13 @@ async def run_agent_with_queue(job_id: str, payload: dict[str, Any], queue: asyn
                 "job_id": job_id,
             }
         )
+        # Stop SSE event listeners
+        if sse_event_consumer:
+            try:
+                await sse_event_consumer.stop_listening()
+            except Exception as e:
+                logger.warning(f"Error stopping SSE listeners: {e}")
+
         # Unbind MCPs when agent finishes
         if mcp_binder and instance_id:
             await mcp_binder.unbind(instance_id, reason="Agent execution completed")
@@ -443,6 +484,14 @@ async def lifespan(app: FastAPI):
             agents_config_path=CONDUCTOR_CONFIG.get("project_path", "") + "/config/agents"
         )
         logger.info("Initialized MCPBinder core component")
+
+        # Initialize SSE Event Consumer
+        global sse_event_consumer
+        async def broadcast_tool_event(event_type: str, data: dict):
+            await gamification_manager.broadcast(event_type, data)
+
+        sse_event_consumer = SSEEventConsumer(on_event_callback=broadcast_tool_event)
+        logger.info("Initialized SSEEventConsumer for tool call live events")
 
         # Initialize database for persona service
         init_database()
@@ -914,6 +963,7 @@ def create_app() -> FastAPI:
                 "mcp": f"http://{SERVER_CONFIG['host']}:{SERVER_CONFIG['mcp_port']}",
                 "health": f"http://{SERVER_CONFIG['host']}:{SERVER_CONFIG['port']}/health",
                 "websocket_gamification": f"ws://{SERVER_CONFIG['host']}:{SERVER_CONFIG['port']}/ws/gamification",
+                "websocket_agent_stream": f"ws://{SERVER_CONFIG['host']}:{SERVER_CONFIG['port']}/ws/agent-stream",
             },
         }
 
@@ -1010,6 +1060,144 @@ def create_app() -> FastAPI:
         finally:
             gamification_manager.disconnect(client_id)
 
+    # ========================================================================
+    # WebSocket: Agent Stream (Watcher → BFF → Frontend, real-time)
+    # ========================================================================
+
+    @app.websocket("/ws/agent-stream")
+    async def websocket_agent_stream(websocket: WebSocket):
+        """
+        WebSocket endpoint for the Watcher to stream Claude CLI events in real-time.
+
+        The Watcher connects here per task execution, sends stream-json events,
+        and this endpoint rebroadcasts them to all gamification WebSocket clients.
+
+        Expected message format from Watcher:
+        {
+            "type": "agent_stream",
+            "data": {
+                "task_id": "...",
+                "agent_id": "...",
+                "instance_id": "...",
+                "conversation_id": "...",
+                "event_type": "message_start|content_block_start|content_block_delta|...",
+                "event": { ... raw stream-json event ... }
+            }
+        }
+
+        Also accepts lifecycle events:
+        {"type": "stream_start", "data": {"task_id": "...", "agent_id": "...", "bound_mcps": [...]}}
+        {"type": "stream_end", "data": {"task_id": "...", "agent_id": "...", "stats": {...}}}
+        """
+        await websocket.accept()
+        stream_id = str(uuid.uuid4())[:8]
+        logger.info(f"🔌 [AGENT-STREAM] Watcher connected (stream={stream_id})")
+
+        try:
+            while True:
+                raw = await websocket.receive_text()
+                try:
+                    msg = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+
+                msg_type = msg.get("type", "")
+                msg_data = msg.get("data", {})
+
+                if msg_type == "stream_start":
+                    # Watcher starting a new task execution
+                    task_id = msg_data.get("task_id", "?")
+                    agent_id = msg_data.get("agent_id", "?")
+                    logger.info(f"📡 [AGENT-STREAM] Task {task_id} started streaming (agent={agent_id})")
+
+                    # Start SSE listeners for MCP tool call events
+                    bound_mcps = msg_data.get("bound_mcps", [])
+                    if sse_event_consumer and bound_mcps and mongo_db:
+                        try:
+                            sidecar_urls = {}
+                            registry_collection = mongo_db["mcp_registry"]
+                            for mcp_name in bound_mcps:
+                                doc = registry_collection.find_one({"name": mcp_name})
+                                if doc:
+                                    internal_url = doc.get("url", "").replace("/sse", "")
+                                    if internal_url:
+                                        sidecar_urls[mcp_name] = internal_url
+                            if sidecar_urls:
+                                await sse_event_consumer.start_listening(
+                                    sidecar_urls=sidecar_urls,
+                                    session_id=task_id,
+                                    context={
+                                        "agent_id": msg_data.get("agent_id", ""),
+                                        "instance_id": msg_data.get("instance_id", ""),
+                                        "conversation_id": msg_data.get("conversation_id", ""),
+                                        "task_id": task_id
+                                    }
+                                )
+                                logger.info(f"📡 [SSE] Started listeners: {list(sidecar_urls.keys())}")
+                        except Exception as e:
+                            logger.warning(f"📡 [SSE] Failed to start listeners: {e}")
+
+                elif msg_type == "stream_end":
+                    # Watcher finished task execution
+                    task_id = msg_data.get("task_id", "?")
+                    logger.info(f"📡 [AGENT-STREAM] Task {task_id} finished streaming")
+
+                    # Stop SSE listeners
+                    if sse_event_consumer:
+                        try:
+                            await sse_event_consumer.stop_listening(session_id=task_id)
+                        except Exception:
+                            pass
+
+                # Broadcast to frontend at two levels:
+                # 1. Debug level: raw agent_stream events (for debug panel)
+                await gamification_manager.broadcast(msg_type, {**msg_data, "level": "debug"})
+
+                # 2. News level: extract high-level events (for "Notícias dos Agentes")
+                if msg_type == "agent_stream":
+                    event = msg_data.get("event", {})
+                    cli_event_type = event.get("type", "")
+                    context = {
+                        "task_id": msg_data.get("task_id", ""),
+                        "agent_id": msg_data.get("agent_id", ""),
+                        "instance_id": msg_data.get("instance_id", ""),
+                        "conversation_id": msg_data.get("conversation_id", ""),
+                    }
+
+                    if cli_event_type == "system" and event.get("subtype") == "init":
+                        tools_count = len(event.get("tools", []))
+                        mcps = [s.get("name") for s in event.get("mcp_servers", []) if s.get("status") == "connected"]
+                        await gamification_manager.broadcast("agent_init", {
+                            **context, "level": "news",
+                            "tools_count": tools_count, "mcp_servers": mcps
+                        })
+
+                    elif cli_event_type == "assistant":
+                        # Extract tool_use blocks as high-level events
+                        content = event.get("message", {}).get("content", [])
+                        for block in content:
+                            if block.get("type") == "tool_use":
+                                await gamification_manager.broadcast("agent_tool_use", {
+                                    **context, "level": "news",
+                                    "tool": block.get("name", "?"),
+                                    "tool_id": block.get("id", "")[:12],
+                                    "input_keys": list(block.get("input", {}).keys())
+                                })
+
+                    elif cli_event_type == "result":
+                        await gamification_manager.broadcast("agent_result", {
+                            **context, "level": "news",
+                            "subtype": event.get("subtype", "?"),
+                            "duration_ms": event.get("duration_ms", 0),
+                            "num_turns": event.get("num_turns", 0),
+                            "cost_usd": event.get("total_cost_usd", 0),
+                        })
+
+        except WebSocketDisconnect:
+            logger.info(f"🔌 [AGENT-STREAM] Watcher disconnected (stream={stream_id})")
+        except Exception as e:
+            logger.error(f"❌ [AGENT-STREAM] Error: {e}", exc_info=True)
+
     # Internal Event Endpoints (for Watcher to emit events)
 
     @app.post("/api/internal/task-event")
@@ -1068,6 +1256,46 @@ def create_app() -> FastAPI:
             agent_name = event_data.get("agent_name", event_data.get("agent_id", "unknown"))
             status = event_data.get("status", "unknown")
             logger.info(f"📡 [TASK-EVENT] Received {event_type} for {agent_name} (status: {status})")
+
+            # Start SSE listeners when watcher picks a task with bound MCPs
+            bound_mcps = event_data.get("bound_mcps", [])
+            if event_type == "task_picked" and sse_event_consumer and bound_mcps and mongo_db:
+                try:
+                    sidecar_urls = {}
+                    registry_collection = mongo_db["mcp_registry"]
+                    for mcp_name in bound_mcps:
+                        doc = registry_collection.find_one({"name": mcp_name})
+                        if doc:
+                            # Use internal Docker URL (not host_url) since BFF runs inside Docker
+                            internal_url = doc.get("url", "").replace("/sse", "")
+                            if internal_url:
+                                sidecar_urls[mcp_name] = internal_url
+
+                    if sidecar_urls:
+                        task_id = event_data.get("task_id", "")
+                        await sse_event_consumer.start_listening(
+                            sidecar_urls=sidecar_urls,
+                            session_id=task_id,
+                            context={
+                                "agent_id": event_data.get("agent_id", ""),
+                                "instance_id": event_data.get("instance_id", ""),
+                                "conversation_id": event_data.get("conversation_id", ""),
+                                "screenplay_id": event_data.get("screenplay_id", ""),
+                                "task_id": task_id
+                            }
+                        )
+                        logger.info(f"📡 [SSE] Started listeners for {list(sidecar_urls.keys())} (task {task_id})")
+                except Exception as e:
+                    logger.warning(f"📡 [SSE] Failed to start listeners: {e}")
+
+            # Stop SSE listeners when task completes or errors
+            if event_type in ("task_completed", "task_error") and sse_event_consumer:
+                try:
+                    task_id = event_data.get("task_id", "")
+                    await sse_event_consumer.stop_listening(session_id=task_id)
+                    logger.info(f"📡 [SSE] Stopped listeners for task {task_id}")
+                except Exception as e:
+                    logger.warning(f"📡 [SSE] Failed to stop listeners: {e}")
 
             # Broadcast to all WebSocket clients
             await gamification_manager.broadcast(event_type, event_data)
