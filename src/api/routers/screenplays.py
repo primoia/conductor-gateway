@@ -104,6 +104,7 @@ async def create_screenplay(data: ScreenplayCreate):
             version=document.get("version", 1),
             createdAt=document["createdAt"],
             updatedAt=document["updatedAt"],
+            lastUsedAt=document.get("lastUsedAt", document["createdAt"]),
         )
 
     except ValueError as e:
@@ -159,6 +160,7 @@ async def list_screenplays(
                 version=doc.get("version", 1),
                 createdAt=doc["createdAt"],
                 updatedAt=doc["updatedAt"],
+                lastUsedAt=doc.get("lastUsedAt", doc["createdAt"]),
             )
             for doc in result["items"]
         ]
@@ -213,6 +215,7 @@ async def get_screenplay(screenplay_id: str):
             version=document.get("version", 1),
             createdAt=document["createdAt"],
             updatedAt=document["updatedAt"],
+            lastUsedAt=document.get("lastUsedAt", document["createdAt"]),
         )
 
     except HTTPException:
@@ -275,6 +278,7 @@ async def update_screenplay(screenplay_id: str, data: ScreenplayUpdate):
             version=document.get("version", 1),
             createdAt=document["createdAt"],
             updatedAt=document["updatedAt"],
+            lastUsedAt=document.get("lastUsedAt", document["createdAt"]),
         )
 
     except HTTPException:
@@ -450,6 +454,7 @@ async def rename_screenplay(screenplay_id: str, data: RenameRequest):
             version=document.get("version", 1),
             createdAt=document["createdAt"],
             updatedAt=document["updatedAt"],
+            lastUsedAt=document.get("lastUsedAt", document["createdAt"]),
         )
 
     except HTTPException:
@@ -520,4 +525,43 @@ async def update_screenplay_working_directory(
         raise
     except Exception as e:
         logger.error(f"Error updating working directory for screenplay {screenplay_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+
+
+@router.patch("/{screenplay_id}/mark-as-used", status_code=status.HTTP_204_NO_CONTENT)
+async def mark_screenplay_as_used(screenplay_id: str):
+    """
+    Update the lastUsedAt timestamp for a screenplay.
+
+    This endpoint should be called when a screenplay is selected or used,
+    ensuring it appears at the top of the list ordered by last usage.
+
+    Args:
+        screenplay_id: Screenplay ID
+
+    Raises:
+        HTTPException: If screenplay not found or service unavailable
+    """
+    service = get_service()
+
+    try:
+        result = service.mark_screenplay_as_used(screenplay_id)
+
+        if not result:
+            logger.warning(f"Screenplay not found for mark-as-used: {screenplay_id}")
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Screenplay with id '{screenplay_id}' not found"
+            )
+
+        logger.info(f"Marked screenplay {screenplay_id} as used")
+        return None  # 204 No Content response
+
+    except HTTPException:
+        raise
+    except ValueError as e:
+        logger.error(f"Invalid screenplay ID: {e}")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    except Exception as e:
+        logger.error(f"Error marking screenplay {screenplay_id} as used: {e}", exc_info=True)
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))

@@ -169,6 +169,7 @@ class ScreenplayResponse(BaseModel):
     version: int = Field(1, description="Version number")
     created_at: datetime = Field(..., alias="createdAt", description="Creation timestamp")
     updated_at: datetime = Field(..., alias="updatedAt", description="Last update timestamp")
+    last_used_at: datetime = Field(..., alias="lastUsedAt", description="Last time this screenplay was used")
 
     model_config = ConfigDict(
         populate_by_name=True,
@@ -208,6 +209,7 @@ class ScreenplayListItem(BaseModel):
     version: int = Field(1, description="Version number")
     created_at: datetime = Field(..., alias="createdAt", description="Creation timestamp")
     updated_at: datetime = Field(..., alias="updatedAt", description="Last update timestamp")
+    last_used_at: datetime = Field(..., alias="lastUsedAt", description="Last time this screenplay was used")
 
     model_config = ConfigDict(populate_by_name=True)
 

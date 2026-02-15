@@ -184,6 +184,7 @@ class ScreenplayService:
             "version": 1,
             "createdAt": now,
             "updatedAt": now,
+            "lastUsedAt": now,
         }
 
         try:
@@ -335,7 +336,7 @@ class ScreenplayService:
         # Fetch documents (exclude content field for performance)
         cursor = (
             self.collection.find(query_filter, {"content": 0})
-            .sort("createdAt", -1)
+            .sort("lastUsedAt", -1)
             .skip(skip)
             .limit(limit)
         )
@@ -611,6 +612,39 @@ class ScreenplayService:
             logger.info(f"Updated working directory for screenplay {screenplay_id}: {working_directory}")
             return True
 
+        return False
+
+    def mark_screenplay_as_used(self, screenplay_id: str) -> bool:
+        """
+        Update the lastUsedAt timestamp for a screenplay.
+
+        Args:
+            screenplay_id: Screenplay ID
+
+        Returns:
+            True if successful, False if screenplay not found
+
+        Raises:
+            ValueError: If invalid ID format
+        """
+        try:
+            obj_id = ObjectId(screenplay_id)
+        except Exception:
+            logger.warning(f"Invalid screenplay ID format: {screenplay_id}")
+            raise ValueError("Invalid screenplay ID format")
+
+        # Update lastUsedAt (even if deleted, to support proper ordering)
+        now = datetime.now(UTC)
+        result = self.collection.update_one(
+            {"_id": obj_id},
+            {"$set": {"lastUsedAt": now}}
+        )
+
+        if result.matched_count > 0:
+            logger.info(f"Updated lastUsedAt for screenplay {screenplay_id}")
+            return True
+
+        logger.warning(f"Screenplay not found: {screenplay_id}")
         return False
 
     def delete_screenplay(self, screenplay_id: str) -> bool:
