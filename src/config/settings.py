@@ -25,7 +25,7 @@ def load_config():
             "observation_timeout_seconds": 10,
         },
         "mongodb": {
-            "url": os.getenv("MONGODB_URL", "mongodb://admin:czrimr@mongodb:27017/?authSource=admin"),
+            "url": os.getenv("MONGODB_URL", "mongodb://localhost:27017/conductor_state"),
             "database": "conductor_state",
         },
     }

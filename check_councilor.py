@@ -7,11 +7,11 @@ from pprint import pprint
 
 # MongoDB connection
 # Try localhost first (outside Docker), then mongodb (inside Docker)
+import os
 import sys
+_base_uri = os.getenv("MONGO_URI", "mongodb://localhost:27017/?authSource=admin")
 MONGO_URLS = [
-    "mongodb://admin:czrimr@localhost:27017/?authSource=admin",
-    "mongodb://admin:czrimr@127.0.0.1:27017/?authSource=admin",
-    "mongodb://admin:czrimr@mongodb:27017/?authSource=admin"
+    _base_uri,
 ]
 DB_NAME = "conductor_state"
 

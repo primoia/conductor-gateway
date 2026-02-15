@@ -64,7 +64,7 @@ class DatabaseMCP(BaseMCPServer):
         # Initialize MongoDB connection
         mongodb_url = os.getenv(
             "MONGODB_URL",
-            "mongodb://admin:czrimr@mongodb:27017/?authSource=admin"
+            "mongodb://localhost:27017/?authSource=admin"
         )
         self.database_name = os.getenv("MONGODB_DATABASE", "conductor_state")
 
