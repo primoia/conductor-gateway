@@ -2364,6 +2364,8 @@ def create_app() -> FastAPI:
     async def list_agent_instances(
         agent_id: str = None,
         status: str = None,
+        screenplay_id: str = None,
+        conversation_id: str = None,
         limit: int = 100,
         offset: int = 0,
         sort: str = "-created_at",
@@ -2375,6 +2377,8 @@ def create_app() -> FastAPI:
         Query parameters:
         - agent_id: Filter by agent_id
         - status: Filter by status (pending|queued|running|completed|error)
+        - screenplay_id: Filter by screenplay_id
+        - conversation_id: Filter by conversation_id
         - limit: Maximum number of results (default: 100, max: 500)
         - offset: Pagination offset (default: 0)
         - sort: Sort field, prefix with '-' for descending (default: -created_at)
@@ -2390,6 +2394,10 @@ def create_app() -> FastAPI:
                 query_filter["agent_id"] = agent_id
             if status:
                 query_filter["status"] = status
+            if screenplay_id:
+                query_filter["screenplay_id"] = screenplay_id
+            if conversation_id:
+                query_filter["conversation_id"] = conversation_id
             
             # Filter out deleted instances by default
             if not include_deleted:
