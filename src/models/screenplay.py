@@ -54,10 +54,11 @@ class ScreenplayCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=200, description="Unique screenplay name")
     description: Optional[str] = Field(None, max_length=500, description="Screenplay description")
     tags: list[str] = Field(default_factory=list, description="Tags for search and categorization")
-    working_directory: Optional[str] = Field(
-        None,
+    working_directory: str = Field(
+        ...,
+        min_length=2,
         max_length=1000,
-        description="Default working directory for agents in this screenplay",
+        description="Default working directory for agents in this screenplay (required)",
         alias="workingDirectory",
         validation_alias=AliasChoices("workingDirectory", "working_directory"),
     )
@@ -90,6 +91,7 @@ class ScreenplayCreate(BaseModel):
                 "name": "My First Screenplay",
                 "description": "A sample screenplay for testing",
                 "tags": ["tutorial", "sample"],
+                "working_directory": "/mnt/ramdisk/meu-projeto",
                 "file_path": "/path/to/screenplay.md",
                 "import_path": "/imports/screenplay.md",
                 "export_path": "/exports/screenplay.md",

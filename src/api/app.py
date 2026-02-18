@@ -635,12 +635,30 @@ def create_app() -> FastAPI:
             instance_id = payload.get("instance_id", f"instance-{int(time.time()*1000)}")
             conversation_id = payload.get("conversation_id")
             screenplay_id = payload.get("screenplay_id")
-            cwd = payload.get("cwd", "/app")
             ai_provider = payload.get("ai_provider", "claude")
             context_mode = payload.get("context_mode", "stateless")
 
-            # 🔥 Gateway generates task_id
+            # CWD resolution: request → screenplay → erro
             from bson import ObjectId
+            cwd = payload.get("cwd")
+            if not cwd and screenplay_id and mongo_db is not None:
+                try:
+                    sp = mongo_db["screenplays"].find_one(
+                        {"_id": ObjectId(screenplay_id), "isDeleted": False},
+                        {"working_directory": 1}
+                    )
+                    if sp and sp.get("working_directory"):
+                        cwd = sp["working_directory"]
+                        logger.info(f"📂 [SSE] CWD herdado do screenplay {screenplay_id}: {cwd}")
+                except Exception as e:
+                    logger.warning(f"⚠️ [SSE] Erro ao buscar CWD do screenplay: {e}")
+            if not cwd:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Diretório de trabalho (CWD) não configurado. Configure o CWD nas propriedades do Roteiro antes de executar o agente."
+                )
+
+            # 🔥 Gateway generates task_id
             task_id = str(ObjectId())
 
             logger.info(f"🚀 [SSE] Starting streaming execution for job {job_id}")
@@ -1711,8 +1729,25 @@ def create_app() -> FastAPI:
             # Get the actual agent_id for consistent referencing
             actual_agent_id = agent.get("agent_id") or agent.get("name")
 
-            # Use cwd from payload if provided, otherwise use default from config
-            final_cwd = cwd or CONDUCTOR_CONFIG.get("project_path")
+            # CWD resolution: request → screenplay → config fallback
+            final_cwd = cwd
+            if not final_cwd and screenplay_id:
+                try:
+                    screenplays_col = mongo_db["screenplays"]
+                    sp = screenplays_col.find_one(
+                        {"_id": ObjectId(screenplay_id), "isDeleted": False},
+                        {"working_directory": 1}
+                    )
+                    if sp and sp.get("working_directory"):
+                        final_cwd = sp["working_directory"]
+                        logger.info(f"📂 [GATEWAY] CWD herdado do screenplay {screenplay_id}: {final_cwd}")
+                except Exception as e:
+                    logger.warning(f"⚠️ [GATEWAY] Erro ao buscar CWD do screenplay: {e}")
+            if not final_cwd:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Diretório de trabalho (CWD) não configurado. Configure o CWD nas propriedades do Roteiro antes de executar o agente."
+                )
 
             # ========================================================================
             # 3. GENERATE TASK_ID AND GET AGENT METADATA
@@ -1913,7 +1948,7 @@ def create_app() -> FastAPI:
             if request.save_to_conversation and conversation_id and bot_msg_id:
                 try:
                     conversations_col = mongo_db["conversations"]
-                    final_content = result_text if task_status == "completed" else f"Erro na execucao (exit_code: {exit_code})"
+                    final_content = result_text if task_status == "completed" else (result_text or f"Erro na execução (exit_code: {exit_code})")
                     update_result = conversations_col.update_one(
                         {"conversation_id": conversation_id, "messages.id": bot_msg_id},
                         {"$set": {
