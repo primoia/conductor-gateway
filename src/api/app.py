@@ -1932,6 +1932,8 @@ def create_app() -> FastAPI:
                     "agent_name": agent_name,
                     "agent_emoji": agent_emoji,
                     "instance_id": instance_id,
+                    "conversation_id": conversation_id,
+                    "screenplay_id": screenplay_id,
                     "status": task_status,
                     "severity": severity,
                     "duration_ms": duration_ms,
