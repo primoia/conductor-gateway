@@ -576,7 +576,7 @@ def create_app() -> FastAPI:
 
     # In development, also allow wildcard (can be restricted via env var in production)
     if SERVER_CONFIG.get("environment", "development") == "development":
-        allowed_origins.append("*")
+        allowed_origins.extend(["http://localhost:11144", "http://localhost:11199", "http://localhost:11299"])
 
     app.add_middleware(
         CORSMiddleware,

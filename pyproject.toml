@@ -9,7 +9,7 @@ package-mode = false
 [tool.poetry.dependencies]
 python = "^3.11"
 cachetools = "5.5.1"
-python-jose = {extras = ["cryptography"], version = "^3.5.0"}
+PyJWT = {extras = ["crypto"], version = ">=2.8.0"}
 passlib = {extras = ["bcrypt"], version = "^1.7.4"}
 google-generativeai = "^0.8.5"
 uvicorn = "^0.36.0"
