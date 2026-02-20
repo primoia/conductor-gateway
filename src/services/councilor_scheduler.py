@@ -317,6 +317,25 @@ class CouncilorBackendScheduler:
             # Get prompt from task config
             prompt_text = task.get("prompt", "Analyze the project and provide insights")
 
+            # 🔥 Inject Live MCP Mesh Topology Context
+            try:
+                from src.services.mcp_mesh_service import mesh_service
+                active_mesh = mesh_service.get_mesh_topology()
+                if active_mesh:
+                    mesh_info = "\n\n=== LIVE MCP SERVICE MESH ===\n"
+                    mesh_info += "The following MCP sidecars are currently active and available on the network:\n"
+                    for node in active_mesh:
+                        port_str = ""
+                        try:
+                            # Extract port from URL like http://host.docker.internal:13000/sse
+                            port_str = node.url.split(":")[2].split("/")[0]
+                        except:
+                            pass
+                        mesh_info += f"- Service: {node.name}" + (f" (Port {port_str})" if port_str else "") + f" | Tools: {node.tools_count}\n"
+                    prompt_text += mesh_info
+            except Exception as e:
+                logger.warning(f"⚠️ Failed to inject MCP Mesh into prompt for instance {instance_id}: {e}")
+
             # Get Conductor API URL
             conductor_api_url = os.getenv("CONDUCTOR_API_URL", "http://primoia-conductor-api:8000")
 
@@ -654,6 +673,25 @@ class CouncilorBackendScheduler:
             # 3. Wait for watcher to execute via LLM
             # 4. Return the result
             prompt_text = task.get("prompt", "Analyze the project and provide insights")
+
+            # 🔥 Inject Live MCP Mesh Topology Context
+            try:
+                from src.services.mcp_mesh_service import mesh_service
+                active_mesh = mesh_service.get_mesh_topology()
+                if active_mesh:
+                    mesh_info = "\n\n=== LIVE MCP SERVICE MESH ===\n"
+                    mesh_info += "The following MCP sidecars are currently active and available on the network:\n"
+                    for node in active_mesh:
+                        port_str = ""
+                        try:
+                            # Extract port from URL like http://host.docker.internal:13000/sse
+                            port_str = node.url.split(":")[2].split("/")[0]
+                        except:
+                            pass
+                        mesh_info += f"- Service: {node.name}" + (f" (Port {port_str})" if port_str else "") + f" | Tools: {node.tools_count}\n"
+                    prompt_text += mesh_info
+            except Exception as e:
+                logger.warning(f"⚠️ Failed to inject MCP Mesh into prompt for legacy councilor {agent_id}: {e}")
 
             logger.info(f"🔍 [COUNCILOR] Calling Conductor API for {agent_id}")
             logger.info(f"   - Input text: {prompt_text[:100]}...")

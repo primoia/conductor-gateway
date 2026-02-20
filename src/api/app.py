@@ -41,6 +41,7 @@ from src.config.settings import CONDUCTOR_CONFIG, MONGODB_CONFIG, SERVER_CONFIG
 from src.utils.mcp_utils import init_agent
 from src.services.councilor_scheduler import CouncilorBackendScheduler
 from src.services.mcp_registry_service import MCPRegistryService
+from src.services.mcp_mesh_service import mesh_service
 from src.mcps.mcp_manager import MCPManager
 from src.services.sse_event_consumer import SSEEventConsumer
 
@@ -521,6 +522,13 @@ async def lifespan(app: FastAPI):
             logger.error(f"❌ Failed to start Councilor Scheduler: {e}")
             councilor_scheduler = None
 
+    # Start MCP Mesh Service
+    try:
+        await mesh_service.start_background_scan()
+        logger.info("✅ MCP Mesh Scanner started")
+    except Exception as e:
+        logger.error(f"❌ Failed to start MCP Mesh Scanner: {e}")
+
     # Start MCP servers in daemon thread
     # This starts all new MCPs (5007-5009) plus legacy MCP (8006)
     mcp_thread = threading.Thread(target=start_mcp_servers, daemon=True, name="MCP-Servers-Thread")
@@ -538,6 +546,13 @@ async def lifespan(app: FastAPI):
     if councilor_scheduler:
         await councilor_scheduler.shutdown()
         logger.info("Councilor scheduler stopped")
+
+    # Stop MCP Mesh Service
+    try:
+        await mesh_service.stop_background_scan()
+        logger.info("MCP Mesh Scanner stopped")
+    except Exception as e:
+        logger.error(f"Error stopping MCP Mesh Scanner: {e}")
 
     # Close Conductor client
     if conductor_client:

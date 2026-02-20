@@ -28,6 +28,7 @@ from src.models.mcp_registry import (
     MCPConfigResponse,
 )
 from src.services.mcp_registry_service import MCPRegistryService
+from src.services.mcp_mesh_service import mesh_service
 
 logger = logging.getLogger(__name__)
 
@@ -178,6 +179,22 @@ async def list_mcps(
         external_count=stats["external"],
         healthy_count=stats["healthy"]
     )
+
+
+@router.get(
+    "/mesh",
+    summary="Get Active MCP Mesh Topology",
+    description="Returns the live, actively verified dynamic Service Mesh of MCP sidecars.",
+)
+async def get_mcp_mesh():
+    """
+    Get the current topology of the active MCP Service Mesh.
+    This bypasses passive heartbeat registries and relies on the active background scanner.
+    """
+    return {
+        "mesh_nodes": mesh_service.get_mesh_topology_as_dict(),
+        "total_active": len(mesh_service.get_mesh_topology())
+    }
 
 
 @router.get(
