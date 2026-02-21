@@ -701,6 +701,15 @@ async def clone_conversation(
         raise HTTPException(status_code=500, detail=f"Erro ao clonar conversa: {str(e)}")
 
 
+@router.patch("/{conversation_id}/settings")
+async def update_conversation_settings(
+    conversation_id: str = Path(...),
+    request: Request = None,
+):
+    """Proxy: Update conversation chain settings (max_chain_depth, auto_delegate)."""
+    return await proxy_request("PATCH", f"/conversations/{conversation_id}/settings", request)
+
+
 @router.patch("/reorder")
 async def reorder_conversations(request: Request):
     """Proxy: Atualizar ordem de exibição das conversas."""
