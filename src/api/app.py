@@ -913,29 +913,42 @@ def create_app() -> FastAPI:
             )
             logger.debug(f"[Proxy /conductor/execute] Full payload: {payload}")
 
-            # Forward request to internal conductor-api with custom timeout
+            # Forward request to internal conductor-api with custom timeout and retry
             timeout_value = payload.get("timeout", 1800)
+            max_retries = 3
+            retry_delays = [1, 3, 5]
+
             async with httpx.AsyncClient(timeout=httpx.Timeout(timeout_value + 10)) as client:
-                response = await client.post(url, json=payload)
-                response.raise_for_status()
-                result = response.json()
+                for attempt in range(max_retries):
+                    try:
+                        response = await client.post(url, json=payload)
+                        response.raise_for_status()
+                        result = response.json()
 
-                logger.info(
-                    f"[Proxy /conductor/execute] Success! Status code: {response.status_code}"
-                )
-                logger.debug(f"[Proxy /conductor/execute] Response: {result}")
+                        logger.info(
+                            f"[Proxy /conductor/execute] Success! Status code: {response.status_code}"
+                        )
+                        logger.debug(f"[Proxy /conductor/execute] Response: {result}")
 
-                return result
+                        return result
 
-        except httpx.HTTPStatusError as e:
-            logger.error(
-                f"[Proxy /conductor/execute] HTTP error from conductor-api: "
-                f"{e.response.status_code} - {e.response.text}"
-            )
-            raise HTTPException(status_code=e.response.status_code, detail=e.response.text)
-        except httpx.RequestError as e:
-            logger.error(f"[Proxy /conductor/execute] Request error to conductor-api: {e}")
-            raise HTTPException(status_code=503, detail=f"Conductor API unavailable: {str(e)}")
+                    except httpx.HTTPStatusError as e:
+                        logger.error(
+                            f"[Proxy /conductor/execute] HTTP error from conductor-api: "
+                            f"{e.response.status_code} - {e.response.text}"
+                        )
+                        raise HTTPException(status_code=e.response.status_code, detail=e.response.text)
+                    except httpx.RequestError as e:
+                        if attempt < max_retries - 1:
+                            delay = retry_delays[attempt]
+                            logger.warning(
+                                f"[Proxy /conductor/execute] Connection error (attempt {attempt + 1}/{max_retries}): {e}. "
+                                f"Retrying in {delay}s..."
+                            )
+                            await asyncio.sleep(delay)
+                        else:
+                            logger.error(f"[Proxy /conductor/execute] Request error after {max_retries} attempts: {e}")
+                            raise HTTPException(status_code=503, detail=f"Conductor API unavailable after {max_retries} attempts: {str(e)}")
         except Exception as e:
             logger.error(f"[Proxy /conductor/execute] Error proxying to conductor-api: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail=str(e))
@@ -1858,31 +1871,46 @@ def create_app() -> FastAPI:
             logger.info(f"   - screenplay_id: {screenplay_id}")
             logger.info(f"   - context_mode: {context_mode}")
 
+            max_retries = 3
+            retry_delays = [1, 3, 5]  # seconds between retries
+            last_error = None
+
             async with httpx.AsyncClient(timeout=CONDUCTOR_CONFIG.get("timeout", 1800) + 30) as client:
-                try:
-                    response = await client.post(
-                        f"{conductor_api_url}/agents/{actual_agent_id}/execute",
-                        json=payload
-                    )
-                    response.raise_for_status()
-                    conductor_result = response.json()
+                for attempt in range(max_retries):
+                    try:
+                        response = await client.post(
+                            f"{conductor_api_url}/agents/{actual_agent_id}/execute",
+                            json=payload
+                        )
+                        response.raise_for_status()
+                        conductor_result = response.json()
 
-                    logger.info(f"✅ [GATEWAY] Conductor API responded successfully")
-                    logger.info(f"   - Status: {response.status_code}")
+                        logger.info(f"✅ [GATEWAY] Conductor API responded successfully")
+                        logger.info(f"   - Status: {response.status_code}")
+                        break
 
-                except httpx.HTTPStatusError as e:
-                    logger.error(f"❌ [GATEWAY] Conductor API error: {e.response.status_code}")
-                    logger.error(f"   - Response: {e.response.text[:500]}")
-                    raise HTTPException(
-                        status_code=e.response.status_code,
-                        detail=f"Conductor API error: {e.response.text}"
-                    )
-                except httpx.RequestError as e:
-                    logger.error(f"❌ [GATEWAY] Connection error to Conductor API: {e}")
-                    raise HTTPException(
-                        status_code=503,
-                        detail=f"Cannot connect to Conductor API: {str(e)}"
-                    )
+                    except httpx.HTTPStatusError as e:
+                        logger.error(f"❌ [GATEWAY] Conductor API error: {e.response.status_code}")
+                        logger.error(f"   - Response: {e.response.text[:500]}")
+                        raise HTTPException(
+                            status_code=e.response.status_code,
+                            detail=f"Conductor API error: {e.response.text}"
+                        )
+                    except httpx.RequestError as e:
+                        last_error = e
+                        if attempt < max_retries - 1:
+                            delay = retry_delays[attempt]
+                            logger.warning(
+                                f"⚠️ [GATEWAY] Connection error to Conductor API (attempt {attempt + 1}/{max_retries}): {e}. "
+                                f"Retrying in {delay}s..."
+                            )
+                            await asyncio.sleep(delay)
+                        else:
+                            logger.error(f"❌ [GATEWAY] Connection error to Conductor API after {max_retries} attempts: {e}")
+                            raise HTTPException(
+                                status_code=503,
+                                detail=f"Cannot connect to Conductor API after {max_retries} attempts: {str(e)}"
+                            )
 
             # ========================================================================
             # 6. EXTRACT RESULT FROM CONDUCTOR API RESPONSE
